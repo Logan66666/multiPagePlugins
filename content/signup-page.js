@@ -383,11 +383,14 @@ async function step5_fillNameBirthday(payload) {
     const hiddenBirthday = document.querySelector('input[name="birthday"]');
     ageInput = document.querySelector('input[name="age"]');
 
+    // Some pages include a hidden birthday input even though the real UI is "age".
+    // In that case we must prioritize filling age to satisfy required validation.
+    if (ageInput) break;
+
     if ((yearSpinner && monthSpinner && daySpinner) || hiddenBirthday) {
       birthdayMode = true;
       break;
     }
-    if (ageInput) break;
     await sleep(100);
   }
 
@@ -446,6 +449,16 @@ async function step5_fillNameBirthday(payload) {
     await humanPause(500, 1300);
     fillInput(ageInput, String(resolvedAge));
     log(`Step 5: Age filled: ${resolvedAge}`);
+
+    // Some age-mode pages still submit a hidden birthday field.
+    // Keep it aligned with generated data so backend validation won't reject.
+    const hiddenBirthday = document.querySelector('input[name="birthday"]');
+    if (hiddenBirthday && hasBirthdayData) {
+      const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      hiddenBirthday.value = dateStr;
+      hiddenBirthday.dispatchEvent(new Event('change', { bubbles: true }));
+      log(`Step 5: Hidden birthday input set (age mode): ${dateStr}`);
+    }
   } else {
     throw new Error('Could not find birthday or age input. URL: ' + location.href);
   }
