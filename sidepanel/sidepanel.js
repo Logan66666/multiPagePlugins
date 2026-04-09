@@ -25,6 +25,8 @@ const btnAutoContinue = document.getElementById('btn-auto-continue');
 const autoContinueBar = document.getElementById('auto-continue-bar');
 const btnClearLog = document.getElementById('btn-clear-log');
 const inputVpsUrl = document.getElementById('input-vps-url');
+const displayRunSuccess = document.getElementById('display-run-success');
+const displayRunFailure = document.getElementById('display-run-failure');
 const selectMailProvider = document.getElementById('select-mail-provider');
 const rowInbucketHost = document.getElementById('row-inbucket-host');
 const inputInbucketHost = document.getElementById('input-inbucket-host');
@@ -151,6 +153,7 @@ async function restoreState() {
       }
     }
 
+    updateAutoRunStatsDisplay(state.autoRunStats);
     updateStatusDisplay(state);
     updateProgressCounter();
     updateMailProviderUI();
@@ -162,6 +165,13 @@ async function restoreState() {
 
 function syncPasswordField(state) {
   inputPassword.value = state.customPassword || state.password || '';
+}
+
+function updateAutoRunStatsDisplay(stats = {}) {
+  const successfulRuns = Math.max(0, Number.parseInt(String(stats.successfulRuns ?? 0), 10) || 0);
+  const failedRuns = Math.max(0, Number.parseInt(String(stats.failedRuns ?? 0), 10) || 0);
+  displayRunSuccess.textContent = `成功 ${successfulRuns}`;
+  displayRunFailure.textContent = `失败 ${failedRuns}`;
 }
 
 function updateMailProviderUI() {
@@ -550,7 +560,8 @@ chrome.runtime.onMessage.addListener((message) => {
     }
 
     case 'AUTO_RUN_STATUS': {
-      const { phase, currentRun, totalRuns, infiniteMode, summaryToast } = message.payload;
+      const { phase, currentRun, totalRuns, infiniteMode, summaryToast, successfulRuns, failedRuns } = message.payload;
+      updateAutoRunStatsDisplay({ successfulRuns, failedRuns });
       const runLabel = infiniteMode
         ? ` (${currentRun}/∞)`
         : totalRuns > 1 ? ` (${currentRun}/${totalRuns})` : '';

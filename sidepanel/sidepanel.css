@@ -291,6 +291,10 @@ header {
   gap: 8px;
 }
 
+.data-row-stats {
+  align-items: flex-start;
+}
+
 .data-inline {
   display: flex;
   align-items: center;
@@ -316,6 +320,40 @@ header {
 }
 
 .data-value.has-value { color: var(--text-primary); }
+
+.run-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+}
+
+.run-stat-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.run-stat-pill.success {
+  border-color: rgba(22, 163, 74, 0.2);
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.run-stat-pill.failure {
+  border-color: rgba(220, 38, 38, 0.2);
+  background: var(--red-soft);
+  color: var(--red);
+}
 
 .mono {
   font-family: 'JetBrains Mono', 'Consolas', monospace;
