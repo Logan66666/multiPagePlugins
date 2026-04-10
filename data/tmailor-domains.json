@@ -1,0 +1,63 @@
+{
+  "whitelist": [
+    "mikrotikvn.com",
+    "mikfarm.com",
+    "libinit.com",
+    "fbhotro.com",
+    "beelsil.com",
+    "emailracc.com",
+    "sonphuongthinh.com",
+    "dulich84.com",
+    "coffeejadore.com",
+    "accclone.com",
+    "emailcoffeehouse.com",
+    "pippoc.com",
+    "hetzez.com",
+    "nickmxh.com"
+  ],
+  "blacklist": [
+    "benphim.com",
+    "groklan.com",
+    "haibabon.com",
+    "img-free.com",
+    "phimib.com",
+    "storebanme.com",
+    "topdatamaster.com",
+    "vinakop.com"
+  ],
+  "stats": {
+    "benphim.com": {
+      "successCount": 0,
+      "failureCount": 1
+    },
+    "groklan.com": {
+      "successCount": 0,
+      "failureCount": 1
+    },
+    "haibabon.com": {
+      "successCount": 0,
+      "failureCount": 1
+    },
+    "img-free.com": {
+      "successCount": 0,
+      "failureCount": 1
+    },
+    "phimib.com": {
+      "successCount": 0,
+      "failureCount": 1
+    },
+    "storebanme.com": {
+      "successCount": 0,
+      "failureCount": 1
+    },
+    "topdatamaster.com": {
+      "successCount": 0,
+      "failureCount": 1
+    },
+    "vinakop.com": {
+      "successCount": 0,
+      "failureCount": 1
+    }
+  },
+  "mode": "com_only"
+}
