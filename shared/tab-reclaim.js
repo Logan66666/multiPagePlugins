@@ -55,6 +55,10 @@
     return parsed.hostname === 'duckduckgo.com' && parsed.pathname === '/email/settings/autofill';
   }
 
+  function isTmailorUrl(parsed) {
+    return parsed.hostname === 'tmailor.com';
+  }
+
   function isInbucketMailboxUrl(parsed, settings) {
     const expectedOrigin = normalizeOrigin(settings?.inbucketHost);
     const expectedMailbox = String(settings?.inbucketMailbox || '').trim();
@@ -86,6 +90,7 @@
     if (isQqMailUrl(parsed)) return 'qq-mail';
     if (isMail163Url(parsed)) return 'mail-163';
     if (isDuckMailUrl(parsed)) return 'duck-mail';
+    if (isTmailorUrl(parsed)) return 'tmailor-mail';
     if (isInbucketMailboxUrl(parsed, settings)) return 'inbucket-mail';
     if (isVpsPanelUrl(parsed, settings)) return 'vps-panel';
     return null;

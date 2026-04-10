@@ -7,7 +7,7 @@
 
   root.EmailAddresses = exports;
 })(typeof globalThis !== 'undefined' ? globalThis : self, function() {
-  const DEFAULT_EMAIL_SOURCE = 'duck';
+  const DEFAULT_EMAIL_SOURCE = 'tmailor';
   const DEFAULT_33MAIL_DOMAIN_SETTINGS = Object.freeze({
     '163': { emailDomain: '' },
     qq: { emailDomain: '' },
@@ -15,7 +15,7 @@
   });
 
   function sanitizeEmailSource(value) {
-    return value === '33mail' || value === 'duck'
+    return value === '33mail' || value === 'duck' || value === 'tmailor'
       ? value
       : DEFAULT_EMAIL_SOURCE;
   }

@@ -9,7 +9,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : self, function() {
   function isMessageChannelClosedError(error) {
     const message = typeof error === 'string' ? error : error?.message || '';
-    return /message channel closed before a response was received/i.test(message);
+    return /message channel closed before a response was received|message channel is closed/i.test(message);
   }
 
   function isReceivingEndMissingError(error) {
@@ -17,11 +17,19 @@
     return /could not establish connection\.\s*receiving end does not exist/i.test(message);
   }
 
+  function buildMailPollRecoveryPlan(error) {
+    if (isMessageChannelClosedError(error) || isReceivingEndMissingError(error)) {
+      return ['soft-retry', 'reload'];
+    }
+    return [];
+  }
+
   function shouldSkipStepResultLog(status) {
     return status === 'failed' || status === 'stopped';
   }
 
   return {
+    buildMailPollRecoveryPlan,
     isMessageChannelClosedError,
     isReceivingEndMissingError,
     shouldSkipStepResultLog,

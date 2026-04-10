@@ -11,9 +11,10 @@ const {
   sanitizeEmailSource,
 } = require('../shared/email-addresses.js');
 
-test('sanitizeEmailSource accepts duck and 33mail only', () => {
+test('sanitizeEmailSource keeps known sources and falls back to tmailor', () => {
   assert.equal(sanitizeEmailSource('duck'), 'duck');
   assert.equal(sanitizeEmailSource('33mail'), '33mail');
+  assert.equal(sanitizeEmailSource('tmailor'), 'tmailor');
   assert.equal(sanitizeEmailSource('qq'), DEFAULT_EMAIL_SOURCE);
   assert.equal(sanitizeEmailSource(undefined), DEFAULT_EMAIL_SOURCE);
 });

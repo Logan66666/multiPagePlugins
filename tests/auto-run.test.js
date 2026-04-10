@@ -12,6 +12,14 @@ test('auto run continues to next round after a normal run failure', () => {
     shouldContinueAutoRunAfterError(new Error('Step 4 failed')),
     true
   );
+  assert.equal(
+    shouldContinueAutoRunAfterError(new Error('Step 5 failed: Auth fatal error page detected after profile submit.')),
+    true
+  );
+  assert.equal(
+    shouldContinueAutoRunAfterError(new Error('Step 5 failed: unsupported_email domain blocked and added to blacklist.')),
+    true
+  );
 });
 
 test('auto run stops on stop and manual-handoff sentinel errors', () => {

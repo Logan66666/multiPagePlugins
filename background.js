@@ -1,6 +1,6 @@
 // background.js — Service Worker: orchestration, state, tab management, message routing
 
-importScripts('shared/email-addresses.js', 'shared/mail-provider-rotation.js', 'data/names.js', 'shared/flow-runner.js', 'shared/runtime-errors.js', 'shared/auto-run.js', 'shared/duck-mail-errors.js', 'shared/sidepanel-settings.js', 'shared/tab-reclaim.js');
+importScripts('shared/email-addresses.js', 'shared/mail-provider-rotation.js', 'shared/tmailor-domains.js', 'shared/tmailor-api.js', 'data/names.js', 'shared/flow-runner.js', 'shared/runtime-errors.js', 'shared/auto-run.js', 'shared/duck-mail-errors.js', 'shared/sidepanel-settings.js', 'shared/tab-reclaim.js');
 
 const LOG_PREFIX = '[MultiPage:bg]';
 const DUCK_AUTOFILL_URL = 'https://duckduckgo.com/email/settings/autofill';
@@ -9,11 +9,13 @@ const AUTO_RUN_HANDOFF_MESSAGE = 'Auto run handed off to manual continuation.';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
 const { runStepSequence } = FlowRunner;
-const { isMessageChannelClosedError, isReceivingEndMissingError, shouldSkipStepResultLog } = RuntimeErrors;
+const { buildMailPollRecoveryPlan, isMessageChannelClosedError, isReceivingEndMissingError, shouldSkipStepResultLog } = RuntimeErrors;
 const { buildAutoRunStatusPayload, shouldContinueAutoRunAfterError, summarizeAutoRunResult } = AutoRun;
 const { addDuckMailRetryHint } = DuckMailErrors;
 const { DEFAULT_EMAIL_SOURCE, generate33MailAddress, get33MailDomainForProvider, sanitizeEmailSource } = EmailAddresses;
 const { chooseMailProviderForAutoRun, getConfiguredRotatableMailProviders, getNextMailProviderAvailabilityTimestamp, isRotatableMailProvider, pruneMailProviderUsage, recordMailProviderUsage } = MailProviderRotation;
+const { DEFAULT_TMAILOR_DOMAIN_STATE, extractEmailDomain, isAllowedTmailorDomain, mergeTmailorDomainStates, normalizeTmailorDomainState, recordTmailorDomainFailure, recordTmailorDomainSuccess, shouldBlacklistTmailorDomainForError } = TmailorDomains;
+const { fetchAllowedTmailorEmail, pollTmailorVerificationCode } = TmailorApi;
 const { buildReclaimableTabRegistry } = TabReclaim;
 const {
   DEFAULT_AUTO_RUN_COUNT,
@@ -30,7 +32,9 @@ const {
 
 const RECLAIM_SOURCE_CONFIG = {
   'signup-page': {
-    readyOnClaim: true,
+    readyOnClaim: false,
+    loadedMarker: '__MULTIPAGE_SIGNUP_PAGE_LOADED',
+    inject: ['shared/verification-code.js', 'shared/phone-verification.js', 'shared/auth-fatal-errors.js', 'shared/unsupported-email.js', 'content/utils.js', 'content/signup-page.js'],
   },
   'qq-mail': {
     readyOnClaim: true,
@@ -39,7 +43,14 @@ const RECLAIM_SOURCE_CONFIG = {
     readyOnClaim: true,
   },
   'duck-mail': {
-    readyOnClaim: true,
+    readyOnClaim: false,
+    loadedMarker: '__MULTIPAGE_DUCK_MAIL_LOADED',
+    inject: ['content/utils.js', 'content/duck-mail.js'],
+  },
+  'tmailor-mail': {
+    readyOnClaim: false,
+    loadedMarker: '__MULTIPAGE_TMAILOR_MAIL_LOADED',
+    inject: ['shared/mail-matching.js', 'shared/mail-freshness.js', 'shared/latest-mail.js', 'content/utils.js', 'content/tmailor-mail.js'],
   },
   'inbucket-mail': {
     readyOnClaim: false,
@@ -113,18 +124,45 @@ const DEFAULT_STATE = {
     successfulRuns: 0,
     failedRuns: 0,
   },
+  tmailorDomainState: DEFAULT_TMAILOR_DOMAIN_STATE,
+  tmailorAccessToken: '',
+  tmailorOutcomeRecorded: false,
   mailProviderUsage: {
     '163': [],
     qq: [],
   },
 };
 
+const TMAILOR_DOMAIN_STATE_KEY = 'tmailorDomainState';
+let cachedTmailorDomainSeeds = null;
+
+async function loadPersistentTmailorDomainSeeds() {
+  if (cachedTmailorDomainSeeds) {
+    return cachedTmailorDomainSeeds;
+  }
+
+  try {
+    const url = chrome.runtime.getURL('data/tmailor-domains.json');
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to load TMailor seeds: ${response.status}`);
+    }
+    cachedTmailorDomainSeeds = await response.json();
+  } catch (err) {
+    console.warn(LOG_PREFIX, 'Failed to load TMailor domain seeds:', err?.message || err);
+    cachedTmailorDomainSeeds = {};
+  }
+
+  return cachedTmailorDomainSeeds;
+}
+
 async function getState() {
-  const [sessionState, persistentSettings] = await Promise.all([
+  const [sessionState, persistentSettings, tmailorDomainState] = await Promise.all([
     chrome.storage.session.get(null),
     getPersistentSettings(),
+    getPersistentTmailorDomainState(),
   ]);
-  return { ...DEFAULT_STATE, ...sessionState, ...persistentSettings };
+  return { ...DEFAULT_STATE, ...sessionState, ...persistentSettings, tmailorDomainState };
 }
 
 async function initializeSessionStorageAccess() {
@@ -143,6 +181,43 @@ async function initializeSessionStorageAccess() {
 async function setState(updates) {
   console.log(LOG_PREFIX, 'storage.set:', JSON.stringify(updates).slice(0, 200));
   await chrome.storage.session.set(updates);
+}
+
+async function getPersistentTmailorDomainState() {
+  const [localState, sessionState, seedConfig] = await Promise.all([
+    chrome.storage.local.get(TMAILOR_DOMAIN_STATE_KEY),
+    chrome.storage.session.get(TMAILOR_DOMAIN_STATE_KEY),
+    loadPersistentTmailorDomainSeeds(),
+  ]);
+
+  const storedRaw = localState[TMAILOR_DOMAIN_STATE_KEY]
+    || sessionState[TMAILOR_DOMAIN_STATE_KEY]
+    || DEFAULT_TMAILOR_DOMAIN_STATE;
+  const storedState = normalizeTmailorDomainState(storedRaw);
+
+  const seedState = normalizeTmailorDomainState({
+    whitelist: seedConfig?.whitelist,
+    blacklist: seedConfig?.blacklist,
+    stats: seedConfig?.stats,
+    mode: seedConfig?.mode,
+  });
+
+  const mergedState = mergeTmailorDomainStates(seedState, storedState);
+
+  if (localState[TMAILOR_DOMAIN_STATE_KEY] === undefined && sessionState[TMAILOR_DOMAIN_STATE_KEY] !== undefined) {
+    await chrome.storage.local.set({ [TMAILOR_DOMAIN_STATE_KEY]: mergedState });
+  }
+
+  return mergedState;
+}
+
+async function setPersistentTmailorDomainState(nextState) {
+  const normalizedState = normalizeTmailorDomainState(nextState);
+  await Promise.all([
+    chrome.storage.local.set({ [TMAILOR_DOMAIN_STATE_KEY]: normalizedState }),
+    chrome.storage.session.set({ [TMAILOR_DOMAIN_STATE_KEY]: normalizedState }),
+  ]);
+  return normalizedState;
 }
 
 async function getPersistentSettings() {
@@ -198,6 +273,21 @@ async function setEmailState(email) {
   broadcastDataUpdate({ email });
 }
 
+async function setTmailorMailboxState(email, accessToken) {
+  await setState({
+    email,
+    tmailorAccessToken: String(accessToken || '').trim(),
+    tmailorOutcomeRecorded: false,
+  });
+  broadcastDataUpdate({ email });
+}
+
+async function setTmailorDomainState(nextState) {
+  const normalizedState = await setPersistentTmailorDomainState(nextState);
+  broadcastDataUpdate({ tmailorDomainState: normalizedState });
+  return normalizedState;
+}
+
 async function setPasswordState(password) {
   await setState({ password });
   broadcastDataUpdate({ password });
@@ -206,27 +296,31 @@ async function setPasswordState(password) {
 async function resetState() {
   console.log(LOG_PREFIX, 'Resetting all state');
   // Preserve settings and persistent data across resets
-  const [prev, persistentSettings] = await Promise.all([
+  const [prev, persistentBundle] = await Promise.all([
     chrome.storage.session.get([
       'seenCodes',
       'seenInbucketMailIds',
       'accounts',
       'tabRegistry',
       'autoRunStats',
+      'tmailorOutcomeRecorded',
       'mailProviderUsage',
       'customPassword',
     ]),
-    getPersistentSettings(),
+    Promise.all([getPersistentSettings(), getPersistentTmailorDomainState()]),
   ]);
+  const [persistentSettings, tmailorDomainState] = persistentBundle;
   await chrome.storage.session.clear();
   await chrome.storage.session.set({
     ...DEFAULT_STATE,
     ...persistentSettings,
+    tmailorDomainState,
     seenCodes: prev.seenCodes || [],
     seenInbucketMailIds: prev.seenInbucketMailIds || [],
     accounts: prev.accounts || [],
     tabRegistry: prev.tabRegistry || {},
     autoRunStats: prev.autoRunStats || DEFAULT_STATE.autoRunStats,
+    tmailorOutcomeRecorded: false,
     mailProviderUsage: pruneMailProviderUsage(prev.mailProviderUsage || DEFAULT_STATE.mailProviderUsage),
     customPassword: prev.customPassword || '',
   });
@@ -605,7 +699,33 @@ async function sendToContentScript(source, message) {
   }
 
   console.log(LOG_PREFIX, `Sending to ${source} (tab ${entry.tabId}):`, message.type);
-  return chrome.tabs.sendMessage(entry.tabId, message);
+  try {
+    return await chrome.tabs.sendMessage(entry.tabId, message);
+  } catch (err) {
+    const errorMessage = err?.message || String(err || '');
+    const recoverableDisconnect =
+      isReceivingEndMissingError(errorMessage) ||
+      isMessageChannelClosedError(errorMessage);
+    const config = getReclaimSourceConfig(source);
+
+    if (!recoverableDisconnect || !config.inject?.length) {
+      throw err;
+    }
+
+    console.warn(LOG_PREFIX, `${source} content script disconnected, attempting reinjection:`, errorMessage);
+    await addLog(`${source} content script disconnected, reinjecting and retrying...`, 'warn');
+
+    const nextRegistry = { ...registry };
+    nextRegistry[source] = { tabId: entry.tabId, ready: false };
+    await setState({ tabRegistry: nextRegistry });
+
+    const alreadyLoaded = await prepareReclaimedTab(source, entry.tabId);
+    if (alreadyLoaded) {
+      return await chrome.tabs.sendMessage(entry.tabId, message);
+    }
+
+    return queueCommand(source, message);
+  }
 }
 
 // ============================================================
@@ -806,6 +926,7 @@ async function handleMessage(message, sender) {
       } else {
         await setStepStatus(message.step, 'failed');
         await addLog(`Step ${message.step} failed: ${message.error}`, 'error');
+        await recordTmailorOutcome('failure', { step: message.step, errorMessage: message.error });
         notifyStepError(message.step, message.error);
       }
       return { ok: true };
@@ -827,7 +948,12 @@ async function handleMessage(message, sender) {
       const step = message.payload.step;
       // Save email if provided (from side panel step 3)
       if (message.payload.email) {
-        await setEmailState(message.payload.email);
+        const state = await getState();
+        if (isTmailorSource(state)) {
+          await markTmailorOutcomePending(message.payload.email);
+        } else {
+          await setEmailState(message.payload.email);
+        }
       }
       runManualFlow(step).catch(async (err) => {
         if (isStopError(err) || isAutoRunHandoffError(err)) {
@@ -849,7 +975,12 @@ async function handleMessage(message, sender) {
     case 'RESUME_AUTO_RUN': {
       clearStopRequest();
       if (message.payload.email) {
-        await setEmailState(message.payload.email);
+        const state = await getState();
+        if (isTmailorSource(state)) {
+          await markTmailorOutcomePending(message.payload.email);
+        } else {
+          await setEmailState(message.payload.email);
+        }
       }
       resumeAutoRun();  // fire-and-forget
       return { ok: true };
@@ -858,6 +989,7 @@ async function handleMessage(message, sender) {
     case 'SAVE_SETTING': {
       const sessionUpdates = {};
       const persistentUpdates = {};
+      let nextTmailorDomainMode = undefined;
 
       if (message.payload.vpsUrl !== undefined) persistentUpdates.vpsUrl = message.payload.vpsUrl;
       if (message.payload.customPassword !== undefined) sessionUpdates.customPassword = message.payload.customPassword;
@@ -869,6 +1001,7 @@ async function handleMessage(message, sender) {
       if (message.payload.autoRunCount !== undefined) persistentUpdates.autoRunCount = sanitizeAutoRunCount(message.payload.autoRunCount);
       if (message.payload.autoRunInfinite !== undefined) persistentUpdates.autoRunInfinite = sanitizeInfiniteAutoRun(message.payload.autoRunInfinite);
       if (message.payload.autoRotateMailProvider !== undefined) persistentUpdates.autoRotateMailProvider = sanitizeAutoRotateMailProvider(message.payload.autoRotateMailProvider);
+      if (message.payload.tmailorDomainMode !== undefined) nextTmailorDomainMode = message.payload.tmailorDomainMode;
 
       if (Object.keys(sessionUpdates).length > 0) {
         await setState(sessionUpdates);
@@ -879,12 +1012,34 @@ async function handleMessage(message, sender) {
           broadcastDataUpdate({ mailProvider: nextSettings.mailProvider });
         }
       }
+      if (nextTmailorDomainMode !== undefined) {
+        const state = await getState();
+        await setTmailorDomainState({
+          ...state.tmailorDomainState,
+          mode: nextTmailorDomainMode,
+        });
+      }
       return { ok: true };
+    }
+
+    case 'SAVE_TMAILOR_DOMAIN_STATE': {
+      const payload = message.payload || {};
+      const state = await getState();
+      const mergedState = await setTmailorDomainState({
+        ...state.tmailorDomainState,
+        ...payload,
+      });
+      return { ok: true, tmailorDomainState: mergedState };
     }
 
     // Side panel data updates
     case 'SAVE_EMAIL': {
-      await setEmailState(message.payload.email);
+      const state = await getState();
+      if (isTmailorSource(state)) {
+        await markTmailorOutcomePending(message.payload.email);
+      } else {
+        await setEmailState(message.payload.email);
+      }
       return { ok: true, email: message.payload.email };
     }
 
@@ -908,6 +1063,15 @@ async function handleMessage(message, sender) {
 
     case 'STOP_FLOW': {
       await requestStop();
+      return { ok: true };
+    }
+
+    case 'DEBUGGER_CLICK_AT': {
+      const tabId = sender.tab?.id;
+      if (!tabId) {
+        return { error: 'Debugger click failed: no sender tab available.' };
+      }
+      await clickWithDebugger(tabId, message.payload?.rect);
       return { ok: true };
     }
 
@@ -940,6 +1104,9 @@ async function handleStepData(step, payload) {
         await setState({ localhostUrl: payload.localhostUrl });
         broadcastDataUpdate({ localhostUrl: payload.localhostUrl });
       }
+      break;
+    case 9:
+      await recordTmailorOutcome('success', { step });
       break;
   }
 }
@@ -1187,13 +1354,68 @@ function getCurrentAutoRotateMailProvider(state) {
 }
 
 function getEmailSourceLabel(emailSource) {
-  return emailSource === '33mail' ? '33mail' : 'Duck Mail';
+  if (emailSource === '33mail') return '33mail';
+  if (emailSource === 'tmailor') return 'TMailor';
+  return 'Duck Mail';
 }
 
 function getEmailWaitHint(emailSource) {
-  return emailSource === '33mail'
-    ? 'Configure the 33mail domain or generate an email manually, then continue'
-    : 'Fetch Duck email or paste manually, then continue';
+  if (emailSource === '33mail') {
+    return 'Configure the 33mail domain or generate an email manually, then continue';
+  }
+  if (emailSource === 'tmailor') {
+    return 'Open TMailor and generate a supported mailbox, then continue';
+  }
+  return 'Fetch Duck email or paste manually, then continue';
+}
+
+function isTmailorSource(state) {
+  return getCurrentEmailSource(state) === 'tmailor';
+}
+
+function isTmailorEmailAllowed(state, email) {
+  return isAllowedTmailorDomain(state?.tmailorDomainState, extractEmailDomain(email));
+}
+
+async function markTmailorOutcomePending(email) {
+  await setState({
+    email,
+    tmailorAccessToken: '',
+    tmailorOutcomeRecorded: false,
+  });
+  broadcastDataUpdate({ email });
+}
+
+async function recordTmailorOutcome(result, context = {}) {
+  const state = await getState();
+  if (!isTmailorSource(state) || state.tmailorOutcomeRecorded) {
+    return;
+  }
+
+  const domain = extractEmailDomain(state.email);
+  if (!domain) {
+    return;
+  }
+
+  if (result === 'success') {
+    const wasWhitelisted = state.tmailorDomainState.whitelist.includes(domain);
+    const nextState = await setTmailorDomainState(recordTmailorDomainSuccess(state.tmailorDomainState, domain));
+    await setState({ tmailorOutcomeRecorded: true });
+    if (!wasWhitelisted && nextState.whitelist.includes(domain)) {
+      await addLog(`TMailor: Added ${domain} to the whitelist after a successful run.`, 'ok');
+    }
+    return;
+  }
+
+  const errorMessage = context.errorMessage || '';
+  const shouldBlacklist = shouldBlacklistTmailorDomainForError(state.tmailorDomainState, domain, errorMessage);
+  const nextState = await setTmailorDomainState(recordTmailorDomainFailure(state.tmailorDomainState, domain, {
+    blacklist: shouldBlacklist,
+  }));
+  await setState({ tmailorOutcomeRecorded: true });
+  if (shouldBlacklist && nextState.blacklist.includes(domain)) {
+    await addLog(`TMailor: Added ${domain} to the blacklist after a blocked run.`, 'warn');
+  }
 }
 
 async function generate33MailEmail(options = {}) {
@@ -1223,11 +1445,58 @@ async function generate33MailEmail(options = {}) {
   return email;
 }
 
+async function fetchTmailorEmail(options = {}) {
+  throwIfStopped();
+  const { generateNew = true } = options;
+  const state = await getState();
+
+  if (generateNew) {
+    try {
+      await addLog('TMailor: Requesting a new mailbox via API...', 'info');
+      const result = await fetchAllowedTmailorEmail({
+        domainState: state.tmailorDomainState,
+      });
+      await setTmailorMailboxState(result.email, result.accessToken);
+      await addLog(`TMailor API: Mailbox ready ${result.email} (token saved for API inbox polling).`, 'ok');
+      return result.email;
+    } catch (err) {
+      await addLog(`TMailor API: New mailbox request failed: ${err.message}`, 'warn');
+      await addLog('TMailor: Falling back to the mailbox page flow for address generation.', 'warn');
+    }
+  }
+
+  await addLog(`TMailor: Opening mailbox page (${generateNew ? 'generate new' : 'reuse current'})...`);
+  await reuseOrCreateTab('tmailor-mail', 'https://tmailor.com/');
+
+  const result = await sendToContentScript('tmailor-mail', {
+    type: 'FETCH_TMAILOR_EMAIL',
+    source: 'background',
+    payload: {
+      generateNew,
+      domainState: state.tmailorDomainState,
+    },
+  });
+
+  if (result?.error) {
+    throw new Error(result.error);
+  }
+  if (!result?.email) {
+    throw new Error('TMailor email was not returned.');
+  }
+
+  await markTmailorOutcomePending(result.email);
+  await addLog(`TMailor: Ready ${result.email}`, 'ok');
+  return result.email;
+}
+
 async function fetchEmailAddress(options = {}) {
   const state = await getState();
   const emailSource = getCurrentEmailSource(state);
   if (emailSource === '33mail') {
     return await generate33MailEmail(options);
+  }
+  if (emailSource === 'tmailor') {
+    return await fetchTmailorEmail(options);
   }
   return await fetchDuckEmail(options);
 }
@@ -1393,6 +1662,9 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
         await setAutoRunStats(autoRunSuccessfulRuns, autoRunFailedRuns + 1);
         await addLog(`Run ${runTargetText} failed: ${err.message}`, 'error');
         if (autoRunInfinite || run < totalRuns) {
+          if (/step 5 failed: .*unsupported_email|step 5 failed: auth fatal error page detected after profile submit\./i.test(err.message || '')) {
+            await addLog(`Run ${runTargetText}: TMailor domain was blocked during step 5. Marked as failed and moving to the next run.`, 'warn');
+          }
           await addLog(`=== Run ${runTargetText} failed. Starting next run automatically... ===`, 'warn');
           sendAutoRunStatus('running', { currentRun: run });
           continue;
@@ -1512,6 +1784,10 @@ async function executeStep3(state) {
     }
   }
 
+  if (emailSource === 'tmailor' && !isTmailorEmailAllowed(state, email)) {
+    email = await fetchTmailorEmail({ generateNew: true });
+  }
+
   if (!email) {
     throw new Error('No email address. Paste email in Side Panel first.');
   }
@@ -1540,6 +1816,9 @@ async function executeStep3(state) {
 // ============================================================
 
 function getMailConfig(state) {
+  if (getCurrentEmailSource(state) === 'tmailor') {
+    return { source: 'tmailor-mail', url: 'https://tmailor.com/', label: 'TMailor' };
+  }
   const provider = state.mailProvider || 'qq';
   if (provider === '163') {
     return { source: 'mail-163', url: 'https://mail.163.com/js6/main.jsp?df=mail163_letter#module=mbox.ListModule%7C%7B%22fid%22%3A1%2C%22order%22%3A%22date%22%2C%22desc%22%3Atrue%7D', label: '163 Mail' };
@@ -1627,6 +1906,30 @@ async function reviveMailTab(mail) {
 }
 
 async function pollVerificationCodeFromMail(step, mail, payload) {
+  const state = await getState();
+
+  if (mail.source === 'tmailor-mail' && state.tmailorAccessToken) {
+    try {
+      await addLog(`Step ${step}: Polling TMailor inbox via API for ${state.email || 'current mailbox'}...`, 'info');
+      const apiResult = await pollTmailorVerificationCode({
+        accessToken: state.tmailorAccessToken,
+        step,
+        senderFilters: payload?.senderFilters,
+        subjectFilters: payload?.subjectFilters,
+        filterAfterTimestamp: payload?.filterAfterTimestamp,
+        excludeCodes: payload?.excludeCodes,
+        targetEmail: payload?.targetEmail,
+        maxAttempts: payload?.maxAttempts,
+        intervalMs: payload?.intervalMs,
+      });
+      await addLog(`Step ${step}: TMailor API returned verification code ${apiResult.code}.`, 'ok');
+      return apiResult;
+    } catch (err) {
+      await addLog(`Step ${step}: TMailor API inbox polling failed: ${err.message}`, 'warn');
+      await addLog(`Step ${step}: Falling back to the TMailor page DOM flow for inbox polling.`, 'warn');
+    }
+  }
+
   let result;
 
   try {
@@ -1637,23 +1940,43 @@ async function pollVerificationCodeFromMail(step, mail, payload) {
       payload,
     });
   } catch (err) {
-    if (!isMessageChannelClosedError(err) && !isReceivingEndMissingError(err)) {
+    const recoveryPlan = buildMailPollRecoveryPlan(err);
+    if (recoveryPlan.length === 0) {
       throw err;
     }
 
-    await addLog(
-      `Step ${step}: Mail page connection was lost (${isReceivingEndMissingError(err) ? 'receiver missing' : 'message channel closed'}). Reloading mailbox and retrying once...`,
-      'warn'
-    );
-    await reviveMailTab(mail);
-    await sleepWithStop(1200);
+    const disconnectReason = isReceivingEndMissingError(err) ? 'receiver missing' : 'message channel closed';
 
-    result = await sendToContentScript(mail.source, {
-      type: 'POLL_EMAIL',
-      step,
-      source: 'background',
-      payload,
-    });
+    for (const recoveryStep of recoveryPlan) {
+      if (recoveryStep === 'soft-retry') {
+        await addLog(
+          `Step ${step}: Mail page connection was lost (${disconnectReason}). Waiting for the message detail page to finish loading and retrying...`,
+          'warn'
+        );
+        await sleepWithStop(1500);
+      } else if (recoveryStep === 'reload') {
+        await addLog(
+          `Step ${step}: Mail page did not recover after navigation. Reloading mailbox and retrying once...`,
+          'warn'
+        );
+        await reviveMailTab(mail);
+        await sleepWithStop(1200);
+      }
+
+      try {
+        result = await sendToContentScript(mail.source, {
+          type: 'POLL_EMAIL',
+          step,
+          source: 'background',
+          payload,
+        });
+        break;
+      } catch (retryErr) {
+        if (recoveryStep === recoveryPlan[recoveryPlan.length - 1]) {
+          throw retryErr;
+        }
+      }
+    }
   }
 
   if (result?.error) {
