@@ -20,6 +20,13 @@
     /code\s+you\s+entered\s+is\s+incorrect/i,
     /code\s+does(?:\s+not|'t)\s+match/i,
   ];
+  const RETRY_STATE_PATTERNS = [
+    /\bretry\b/i,
+    /try\s+again/i,
+    /请重试/i,
+    /重新尝试/i,
+    /验证失败/i,
+  ];
 
   function normalizeText(value) {
     return (value || '').replace(/\s+/g, ' ').trim();
@@ -34,7 +41,17 @@
     return REJECT_PATTERNS.some((pattern) => pattern.test(normalized));
   }
 
+  function isVerificationRetryStateText(text) {
+    const normalized = normalizeText(text);
+    if (!normalized) {
+      return false;
+    }
+
+    return RETRY_STATE_PATTERNS.some((pattern) => pattern.test(normalized));
+  }
+
   return {
     isVerificationCodeRejectedText,
+    isVerificationRetryStateText,
   };
 });
