@@ -1,15 +1,27 @@
 (function() {
 if (window.__MULTIPAGE_TMAILOR_MAIL_LOADED) {
-  console.log('[MultiPage:tmailor-mail] Content script already loaded on', location.href);
+  console.log('[Infinito.AI:tmailor-mail] Content script already loaded on', location.href);
   return;
 }
 window.__MULTIPAGE_TMAILOR_MAIL_LOADED = true;
 
-const TMAILOR_PREFIX = '[MultiPage:tmailor-mail]';
+const TMAILOR_PREFIX = '[Infinito.AI:tmailor-mail]';
 const { findLatestMatchingItem } = LatestMail;
 const { getStepMailMatchProfile, matchesSubjectPatterns, normalizeText } = MailMatching;
 const { isMailFresh, parseMailTimestampCandidates } = MailFreshness;
 const EMAIL_REGEX = /\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/i;
+const DEFAULT_CLOUDFLARE_TIMEOUT_MS = 18000;
+const MAX_CLOUDFLARE_CHECKBOX_ATTEMPTS = 8;
+const CLOUDFLARE_TURNSTILE_HOTSPOTS = [
+  { xRatio: 0.12, yOffset: 0 },
+  { xRatio: 0.16, yOffset: -6 },
+  { xRatio: 0.16, yOffset: 6 },
+  { xRatio: 0.12, yOffset: -8 },
+  { xRatio: 0.14, yOffset: 8 },
+  { xRatio: 0.18, yOffset: -4 },
+  { xRatio: 0.14, yOffset: 4 },
+  { xRatio: 0.16, yOffset: 0 },
+];
 
 console.log(TMAILOR_PREFIX, 'Content script loaded on', location.href);
 log(`TMailor content script loaded on ${location.href}. Waiting for mailbox commands...`, 'info');
@@ -143,7 +155,7 @@ async function runMailboxInterruptionSweep(options = {}) {
     includeCloudflare = true,
     monetizationTimeoutMs = 15000,
     interstitialTimeoutMs = 5000,
-    cloudflareTimeoutMs = 12000,
+    cloudflareTimeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_MS,
   } = options;
 
   mailboxInterruptionSweepActive = true;
@@ -210,15 +222,15 @@ function findCloudflareConfirmButton() {
   return findButtonByText([/confirm/i]);
 }
 
-function findCloudflareCheckboxTarget() {
+function findCloudflareCheckboxTargetCandidate() {
   const iframe = findVisibleCloudflareChallengeIframe();
   if (isElementVisible(iframe)) {
-    return iframe;
+    return { target: iframe, source: 'iframe' };
   }
 
   const visibleChallengeContainer = findVisibleCloudflareChallengeContainer();
   if (visibleChallengeContainer) {
-    return visibleChallengeContainer;
+    return { target: visibleChallengeContainer, source: 'turnstile-container' };
   }
 
   const textTarget = Array.from(document.querySelectorAll('label, button, div, span')).find((el) => {
@@ -229,7 +241,11 @@ function findCloudflareCheckboxTarget() {
     return /请验证您是真人|verify you are human|i am human|not a robot/i.test(text);
   });
 
-  return textTarget || null;
+  return textTarget ? { target: textTarget, source: 'text-fallback' } : null;
+}
+
+function findCloudflareCheckboxTarget() {
+  return findCloudflareCheckboxTargetCandidate()?.target || null;
 }
 
 function findVisibleCloudflareChallengeContainer() {
@@ -329,6 +345,17 @@ function hasSoftCloudflareFirewallMessage() {
 function getCloudflareResponseTokenLength() {
   const input = document.querySelector('input[name="cf-turnstile-response"], input[id*="cf-chl-widget"][id$="_response"]');
   return String(input?.value || '').trim().length;
+}
+
+function hasCloudflareVisualSuccessIndicator() {
+  const text = normalizeText(document.body?.innerText || '');
+  return /(?:^|\s)(?:success|verified|verification succeeded)(?:!|$)|成功!?/i.test(text);
+}
+
+function hasCloudflareAutoVerifyingIndicator() {
+  const text = normalizeText(document.body?.innerText || '');
+  return /正在验证|验证中|verifying(?:\.\.\.)?|verification in progress|checking/i.test(text)
+    && !hasCloudflareVisualSuccessIndicator();
 }
 
 function hasCloudflareChallengeShell() {
@@ -478,7 +505,7 @@ function getElementCenterRect(el) {
   };
 }
 
-function getCloudflareCheckboxRect(target) {
+function getCloudflareCheckboxRect(target, attemptNumber = 1) {
   if (!target || typeof target.getBoundingClientRect !== 'function') {
     return null;
   }
@@ -491,13 +518,44 @@ function getCloudflareCheckboxRect(target) {
   const targetSummary = `${String(target.tagName || '').toUpperCase()} ${String(target.className || '')} ${String(target.id || '')}`.toLowerCase();
   const looksLikeTurnstile = /cf-turnstile|turnstile|cloudflare|html-captcha|iframe/.test(targetSummary);
   if (!looksLikeTurnstile) {
-    return getElementCenterRect(target);
+    const centerRect = getElementCenterRect(target);
+    if (!centerRect) {
+      return null;
+    }
+    return {
+      ...centerRect,
+      holdMs: 110,
+      approachX: centerRect.centerX - 3,
+      approachY: centerRect.centerY + 2,
+      hotspotLabel: 'center',
+      lane: 'generic',
+      targetBox: {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      },
+    };
   }
 
-  const offsetX = Math.max(26, Math.min(rect.width * 0.12, 36));
+  const hotspot = CLOUDFLARE_TURNSTILE_HOTSPOTS[Math.max(0, (attemptNumber - 1) % CLOUDFLARE_TURNSTILE_HOTSPOTS.length)];
+  const offsetX = Math.max(26, Math.min(rect.width * hotspot.xRatio, 54));
+  const centerY = rect.top + (rect.height / 2);
+  const clampedCenterY = Math.min(rect.top + rect.height - 12, Math.max(rect.top + 12, centerY + hotspot.yOffset));
   return {
     centerX: rect.left + offsetX,
-    centerY: rect.top + (rect.height / 2),
+    centerY: clampedCenterY,
+    holdMs: 90 + (Math.max(0, (attemptNumber - 1) % 3) * 25),
+    approachX: rect.left + Math.max(18, offsetX - 8),
+    approachY: Math.min(rect.top + rect.height - 12, Math.max(rect.top + 12, clampedCenterY + ((attemptNumber % 2 === 0) ? -3 : 3))),
+    hotspotLabel: `lane-${hotspot.xRatio.toFixed(2)}-${hotspot.yOffset >= 0 ? '+' : ''}${hotspot.yOffset}`,
+    lane: 'turnstile-left-checkbox',
+    targetBox: {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    },
   };
 }
 
@@ -505,7 +563,12 @@ async function requestDebuggerClickAt(rect) {
   const response = await chrome.runtime.sendMessage({
     type: 'DEBUGGER_CLICK_AT',
     source: 'tmailor-mail',
-    payload: { rect },
+    payload: {
+      rect,
+      approachX: Number.isFinite(rect?.approachX) ? rect.approachX : undefined,
+      approachY: Number.isFinite(rect?.approachY) ? rect.approachY : undefined,
+      holdMs: Number.isFinite(rect?.holdMs) ? rect.holdMs : undefined,
+    },
   });
 
   if (response?.error) {
@@ -787,16 +850,37 @@ async function dismissBlockingOverlay(timeoutMs = 4000) {
   return false;
 }
 
-async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = 12000) {
+async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_MS) {
+  const start = Date.now();
   if (!isCloudflareChallengeVisible()) {
     return false;
   }
 
   log('TMailor: Cloudflare challenge is blocking the mailbox, attempting automatic verification first', 'warn');
   const handled = await waitForCloudflareConfirm(timeoutMs);
-  if (handled && !isCloudflareChallengeVisible()) {
-    log('TMailor: Cloudflare challenge cleared automatically', 'ok');
-    return true;
+  if (handled) {
+    if (!isCloudflareChallengeVisible()) {
+      log('TMailor: Cloudflare challenge cleared automatically', 'ok');
+      return true;
+    }
+
+    const elapsed = Date.now() - start;
+    const remainingBudget = Math.max(0, timeoutMs - elapsed);
+    const postConfirmGraceMs = Math.min(5000, Math.max(2500, remainingBudget));
+    const graceStart = Date.now();
+    log(`TMailor: Cloudflare verification was submitted. Waiting up to ${postConfirmGraceMs}ms for the challenge shell to disappear...`, 'info');
+    while (Date.now() - graceStart < postConfirmGraceMs) {
+      throwIfStopped();
+      if (!isCloudflareChallengeVisible()) {
+        log('TMailor: Cloudflare challenge cleared during the post-confirm grace window', 'ok');
+        return true;
+      }
+      await sleep(250);
+    }
+    if (!isCloudflareChallengeVisible()) {
+      log('TMailor: Cloudflare challenge cleared during the post-confirm grace window', 'ok');
+      return true;
+    }
   }
 
   if (handled) {
@@ -808,13 +892,17 @@ async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = 12000) {
   throw new Error('Cloudflare challenge detected on TMailor. Automatic verification did not complete, please take over manually.');
 }
 
-async function waitForCloudflareConfirm(timeoutMs = 12000) {
+async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_MS) {
   const start = Date.now();
   const gracePeriodMs = Math.min(1500, timeoutMs);
   const delayedConfirmRetryMs = 6000;
+  const textFallbackGraceMs = 1800;
+  const visualSuccessFallbackMs = 5000;
+  const autoVerificationWaitMs = 12000;
   let sawChallenge = false;
   let challengeResolvedAt = 0;
   let lastCheckboxAttemptAt = 0;
+  let firstCheckboxAttemptAt = 0;
   let lastConfirmAttemptAt = 0;
   let loggedChallengeDetected = false;
   let loggedConfirmDisabled = false;
@@ -824,9 +912,129 @@ async function waitForCloudflareConfirm(timeoutMs = 12000) {
   let hasAttemptedCheckboxClick = false;
   let loggedChallengeDetails = false;
   let loggedResponseTokenDetected = false;
+  let lastCheckboxSource = '';
+  let checkboxAttemptCount = 0;
+  let confirmAttemptCount = 0;
+  let lastDiagnosticSignature = '';
+  let lastDiagnosticLogAt = 0;
+  let loggedTextFallbackDelay = false;
+  let visualSuccessFallbackUsed = false;
+  let loggedNoTokenThreshold = false;
+  let loggedAutoVerifyingWait = false;
+  let sawAutoVerifyingIndicator = false;
 
   function hasVerificationCompletionSignal(tokenLength) {
     return Number(tokenLength) > 0;
+  }
+
+  function getConfirmState(confirmButton) {
+    if (!confirmButton) {
+      return 'missing';
+    }
+    return isElementDisabled(confirmButton) ? 'disabled' : 'enabled';
+  }
+
+  function buildDiagnosticMessage(reason, {
+    challengeTextVisible,
+    challengeShellVisible,
+    responseTokenLength,
+    confirmButton,
+    checkboxCandidate,
+  }) {
+    const elapsed = Date.now() - start;
+    const candidateSource = checkboxCandidate?.source || 'none';
+    const parts = [
+      `elapsed=${elapsed}ms`,
+      `tokenLength=${responseTokenLength}`,
+      `challengeTextVisible=${challengeTextVisible}`,
+      `challengeShellVisible=${challengeShellVisible}`,
+      `confirm=${getConfirmState(confirmButton)}`,
+      `attemptedCheckbox=${hasAttemptedCheckboxClick}`,
+      `checkboxAttempts=${checkboxAttemptCount}`,
+      `confirmAttempts=${confirmAttemptCount}`,
+      `lastPath=${lastCheckboxSource || 'none'}`,
+      `candidatePath=${candidateSource}`,
+    ];
+    if (checkboxCandidate?.target) {
+      parts.push(describeElementForLog(checkboxCandidate.target, 'candidate'));
+    }
+    return `TMailor: Cloudflare ${reason} (${parts.join('; ')})`;
+  }
+
+  function logConfirmDecision(reason, {
+    challengeTextVisible,
+    challengeShellVisible,
+    responseTokenLength,
+    confirmButton,
+  }) {
+    log(`TMailor: Cloudflare confirm decision (reason=${reason}; tokenLength=${responseTokenLength}; challengeTextVisible=${challengeTextVisible}; challengeShellVisible=${challengeShellVisible}; confirm=${getConfirmState(confirmButton)}; checkboxAttempts=${checkboxAttemptCount}; confirmAttempts=${confirmAttemptCount}; lastPath=${lastCheckboxSource || 'none'}${confirmButton ? `; ${describeElementForLog(confirmButton, 'confirm')}` : ''})`, 'info');
+    log(
+      `TMailor: Cloudflare Confirm trigger: reason=${reason}; token=${responseTokenLength > 0 ? 'yes' : 'no'}; tokenLength=${responseTokenLength}; visualSuccess=${hasCloudflareVisualSuccessIndicator() ? 'yes' : 'no'}; autoVerifyingSeen=${sawAutoVerifyingIndicator ? 'yes' : 'no'}; checkboxClicked=${hasAttemptedCheckboxClick ? 'yes' : 'no'}; challengeTextVisible=${challengeTextVisible ? 'yes' : 'no'}; challengeShellVisible=${challengeShellVisible ? 'yes' : 'no'}; confirm=${getConfirmState(confirmButton)}`,
+      'info'
+    );
+  }
+
+  async function tryClickConfirmAfterVerification(reason) {
+    const responseTokenLength = getCloudflareResponseTokenLength();
+    if (!hasVerificationCompletionSignal(responseTokenLength)) {
+      return false;
+    }
+    const challengeTextVisible = hasCloudflareChallengeText();
+    const challengeShellVisible = hasCloudflareChallengeShell();
+    const confirmButton = findCloudflareConfirmButton();
+    if (!confirmButton || isElementDisabled(confirmButton)) {
+      return false;
+    }
+    if (reason === 'delayed-retry') {
+      lastConfirmAttemptAt = Date.now();
+    }
+    logConfirmDecision(reason, {
+      challengeTextVisible,
+      challengeShellVisible,
+      responseTokenLength,
+      confirmButton,
+    });
+    log(`TMailor: Cloudflare ${reason === 'post-click-check' ? 'verification finished right after the checkbox click, clicking Confirm' : 'retry window reached after checkbox verification, clicking Confirm'} (${describeElementForLog(confirmButton, 'confirm')}${lastCheckboxSource ? `; path=${lastCheckboxSource}` : ''})`, 'info');
+    confirmAttemptCount += 1;
+    simulateClick(confirmButton);
+    await sleep(1200);
+    if (lastCheckboxSource) {
+      log(`TMailor: Cloudflare verification path: ${lastCheckboxSource}`, 'info');
+    }
+    return true;
+  }
+
+  function maybeLogDiagnosticState({
+    challengeTextVisible,
+    challengeShellVisible,
+    responseTokenLength,
+    confirmButton,
+    checkboxCandidate,
+  }) {
+    const signature = [
+      challengeTextVisible ? '1' : '0',
+      challengeShellVisible ? '1' : '0',
+      responseTokenLength,
+      getConfirmState(confirmButton),
+      checkboxCandidate?.source || 'none',
+      lastCheckboxSource || 'none',
+      hasAttemptedCheckboxClick ? '1' : '0',
+      checkboxAttemptCount,
+      confirmAttemptCount,
+    ].join('|');
+    const now = Date.now();
+    if (signature === lastDiagnosticSignature && now - lastDiagnosticLogAt < 2000) {
+      return;
+    }
+    lastDiagnosticSignature = signature;
+    lastDiagnosticLogAt = now;
+    log(buildDiagnosticMessage('state update', {
+      challengeTextVisible,
+      challengeShellVisible,
+      responseTokenLength,
+      confirmButton,
+      checkboxCandidate,
+    }), 'info');
   }
 
   while (Date.now() - start < timeoutMs) {
@@ -844,6 +1052,13 @@ async function waitForCloudflareConfirm(timeoutMs = 12000) {
         }
         const confirmButton = findCloudflareConfirmButton();
         if (confirmButton && !isElementDisabled(confirmButton)) {
+          logConfirmDecision('challenge-hidden', {
+            challengeTextVisible,
+            challengeShellVisible,
+            responseTokenLength,
+            confirmButton,
+          });
+          confirmAttemptCount += 1;
           log('TMailor: Cloudflare verification detected, clicking Confirm', 'info');
           simulateClick(confirmButton);
           await sleep(1200);
@@ -866,20 +1081,96 @@ async function waitForCloudflareConfirm(timeoutMs = 12000) {
           challengeResolvedAt = Date.now();
           log('TMailor: Cloudflare challenge shell remains, but verification looks complete', 'info');
         }
-        log(`TMailor: Cloudflare verification detected (tokenLength=${responseTokenLength}), clicking Confirm`, 'info');
+        logConfirmDecision('verification-signal', {
+          challengeTextVisible,
+          challengeShellVisible,
+          responseTokenLength,
+          confirmButton,
+        });
+        log(`TMailor: Cloudflare verification detected (tokenLength=${responseTokenLength}), clicking Confirm${lastCheckboxSource ? ` (path=${lastCheckboxSource})` : ''}`, 'info');
+        confirmAttemptCount += 1;
+        simulateClick(confirmButton);
+        await sleep(1200);
+        if (lastCheckboxSource) {
+          log(`TMailor: Cloudflare verification path: ${lastCheckboxSource}`, 'info');
+        }
+        return true;
+      }
+    }
+
+    if (responseTokenLength > 0 && !loggedResponseTokenDetected) {
+      loggedResponseTokenDetected = true;
+      log(`TMailor: Cloudflare response token detected (length=${responseTokenLength}). Waiting for a stable confirm decision...`, 'info');
+    }
+
+    if (
+      sawAutoVerifyingIndicator
+      && !hasAttemptedCheckboxClick
+      && !hasVerificationCompletionSignal(responseTokenLength)
+      && hasCloudflareVisualSuccessIndicator()
+    ) {
+      const confirmButton = findCloudflareConfirmButton();
+      if (confirmButton && !isElementDisabled(confirmButton)) {
+        visualSuccessFallbackUsed = true;
+        log('TMailor: Cloudflare challenge auto-verified without a checkbox click. Clicking Confirm after the visual success signal...', 'info');
+        logConfirmDecision('visual-success-auto', {
+          challengeTextVisible,
+          challengeShellVisible,
+          responseTokenLength,
+          confirmButton,
+        });
+        confirmAttemptCount += 1;
         simulateClick(confirmButton);
         await sleep(1200);
         return true;
       }
     }
 
+    if (
+      !hasAttemptedCheckboxClick
+      && !hasVerificationCompletionSignal(responseTokenLength)
+      && hasCloudflareAutoVerifyingIndicator()
+      && Date.now() - start < autoVerificationWaitMs
+    ) {
+      sawAutoVerifyingIndicator = true;
+      if (!loggedAutoVerifyingWait) {
+        loggedAutoVerifyingWait = true;
+        log('TMailor: Cloudflare is auto-verifying in the background. Waiting for a success signal before touching the checkbox...', 'info');
+      }
+      await sleep(250);
+      continue;
+    }
+
     if (hasAttemptedCheckboxClick && hasVerificationCompletionSignal(responseTokenLength) && Date.now() - lastConfirmAttemptAt >= delayedConfirmRetryMs) {
+      if (await tryClickConfirmAfterVerification('delayed-retry')) {
+        return true;
+      }
+    }
+
+    if (
+      hasAttemptedCheckboxClick
+      && !visualSuccessFallbackUsed
+      && !hasVerificationCompletionSignal(responseTokenLength)
+      && firstCheckboxAttemptAt
+      && Date.now() - firstCheckboxAttemptAt >= visualSuccessFallbackMs
+      && hasCloudflareVisualSuccessIndicator()
+    ) {
       const confirmButton = findCloudflareConfirmButton();
       if (confirmButton && !isElementDisabled(confirmButton)) {
-        lastConfirmAttemptAt = Date.now();
-        log(`TMailor: Cloudflare Confirm became clickable after checkbox verification, retrying Confirm (${describeElementForLog(confirmButton, 'confirm')})`, 'info');
+        visualSuccessFallbackUsed = true;
+        log('TMailor: Cloudflare widget reports a visual success state, but no token was observed after 5000ms. Trying Confirm as a fallback...', 'warn');
+        logConfirmDecision('visual-success-fallback', {
+          challengeTextVisible,
+          challengeShellVisible,
+          responseTokenLength,
+          confirmButton,
+        });
+        confirmAttemptCount += 1;
         simulateClick(confirmButton);
         await sleep(1200);
+        if (lastCheckboxSource) {
+          log(`TMailor: Cloudflare verification path: ${lastCheckboxSource}`, 'info');
+        }
         return true;
       }
     }
@@ -894,14 +1185,10 @@ async function waitForCloudflareConfirm(timeoutMs = 12000) {
       loggedChallengeDetails = true;
       log(`TMailor: Cloudflare challenge details: ${describeCloudflareChallengeForLog()}`, 'info');
     }
-    if (responseTokenLength > 0 && !loggedResponseTokenDetected) {
-      loggedResponseTokenDetected = true;
-      log(`TMailor: Cloudflare response token detected (length=${responseTokenLength}). Waiting for Confirm to become clickable...`, 'info');
-    }
     const confirmButton = findCloudflareConfirmButton();
     if (confirmButton && !isElementDisabled(confirmButton) && !loggedPrematureConfirm) {
       loggedPrematureConfirm = true;
-      log(`TMailor: Cloudflare Confirm button looks clickable before challenge clears, waiting for verification to finish (${describeElementForLog(confirmButton, 'confirm')})`, 'info');
+      log(`TMailor: Cloudflare Confirm button is already enabled, but verification is still pending (${describeElementForLog(confirmButton, 'confirm')})`, 'info');
     }
 
     if (confirmButton && isElementDisabled(confirmButton) && !loggedConfirmDisabled) {
@@ -909,13 +1196,57 @@ async function waitForCloudflareConfirm(timeoutMs = 12000) {
       log(`TMailor: Cloudflare Confirm button is still disabled, waiting for checkbox verification (${describeElementForLog(confirmButton, 'confirm')})`, 'info');
     }
 
+    const checkboxCandidate = findCloudflareCheckboxTargetCandidate();
+    maybeLogDiagnosticState({
+      challengeTextVisible,
+      challengeShellVisible,
+      responseTokenLength,
+      confirmButton,
+      checkboxCandidate,
+    });
+
+    if (
+      hasAttemptedCheckboxClick
+      && !hasVerificationCompletionSignal(responseTokenLength)
+      && checkboxAttemptCount >= MAX_CLOUDFLARE_CHECKBOX_ATTEMPTS
+    ) {
+      if (!loggedNoTokenThreshold) {
+        loggedNoTokenThreshold = true;
+        log(
+          `TMailor: Cloudflare auto-attempt reached ${MAX_CLOUDFLARE_CHECKBOX_ATTEMPTS} checkbox clicks without receiving a token. Pausing further checkbox clicks and waiting for a late verification signal or timeout...`,
+          'warn'
+        );
+      }
+      await sleep(250);
+      continue;
+    }
+
     if (Date.now() - lastCheckboxAttemptAt >= 1500) {
-      const checkboxTarget = findCloudflareCheckboxTarget();
-      const checkboxRect = getCloudflareCheckboxRect(checkboxTarget);
+      const checkboxTarget = checkboxCandidate?.target || null;
+      const checkboxSource = checkboxCandidate?.source || 'unknown';
+      if (checkboxSource === 'text-fallback' && !challengeShellVisible && Date.now() - start < textFallbackGraceMs) {
+        if (!loggedTextFallbackDelay) {
+          loggedTextFallbackDelay = true;
+          log(`TMailor: Cloudflare fallback text appeared before the widget. Waiting briefly for the real checkbox container before using ${checkboxSource}...`, 'info');
+        }
+        await sleep(250);
+        continue;
+      }
+      const nextAttemptNumber = checkboxAttemptCount + 1;
+      const checkboxRect = getCloudflareCheckboxRect(checkboxTarget, nextAttemptNumber);
       if (checkboxRect) {
         lastCheckboxAttemptAt = Date.now();
+        if (!firstCheckboxAttemptAt) {
+          firstCheckboxAttemptAt = lastCheckboxAttemptAt;
+        }
         hasAttemptedCheckboxClick = true;
-        log(`TMailor: Cloudflare checkbox detected, clicking verification area (${describeElementForLog(checkboxTarget, 'target')}; center=${Math.round(checkboxRect.centerX)},${Math.round(checkboxRect.centerY)})`, 'info');
+        lastCheckboxSource = checkboxSource;
+        checkboxAttemptCount += 1;
+        log(
+          `TMailor: Cloudflare checkbox hotspot (attempt ${checkboxAttemptCount}/${MAX_CLOUDFLARE_CHECKBOX_ATTEMPTS}; source=${checkboxSource}; lane=${checkboxRect.lane || 'unknown'}; hotspot=${checkboxRect.hotspotLabel || 'default'}; targetBox=${Math.round(checkboxRect.targetBox?.left || 0)},${Math.round(checkboxRect.targetBox?.top || 0)} ${Math.round(checkboxRect.targetBox?.width || 0)}x${Math.round(checkboxRect.targetBox?.height || 0)}; click=${Math.round(checkboxRect.centerX)},${Math.round(checkboxRect.centerY)}; approach=${Math.round(checkboxRect.approachX || checkboxRect.centerX)},${Math.round(checkboxRect.approachY || checkboxRect.centerY)}; hold=${Math.round(checkboxRect.holdMs || 0)}ms)`,
+          'info'
+        );
+        log(`TMailor: Cloudflare checkbox detected via ${checkboxSource}, clicking verification area (${describeElementForLog(checkboxTarget, 'target')}; center=${Math.round(checkboxRect.centerX)},${Math.round(checkboxRect.centerY)})`, 'info');
 
         try {
           await requestDebuggerClickAt(checkboxRect);
@@ -931,7 +1262,13 @@ async function waitForCloudflareConfirm(timeoutMs = 12000) {
           loggedWaitingForVerificationResult = true;
           log('TMailor: Cloudflare checkbox click dispatched. Waiting for the challenge to report success before clicking Confirm...', 'info');
         }
+        if (await tryClickConfirmAfterVerification('post-click-check')) {
+          return true;
+        }
         await sleep(1600);
+        if (await tryClickConfirmAfterVerification('post-click-check')) {
+          return true;
+        }
         continue;
       }
 
@@ -945,6 +1282,18 @@ async function waitForCloudflareConfirm(timeoutMs = 12000) {
   }
 
   if (sawChallenge) {
+    const challengeTextVisible = hasCloudflareChallengeText();
+    const challengeShellVisible = hasCloudflareChallengeShell();
+    const responseTokenLength = getCloudflareResponseTokenLength();
+    const confirmButton = findCloudflareConfirmButton();
+    const checkboxCandidate = findCloudflareCheckboxTargetCandidate();
+    log(buildDiagnosticMessage('timeout summary', {
+      challengeTextVisible,
+      challengeShellVisible,
+      responseTokenLength,
+      confirmButton,
+      checkboxCandidate,
+    }), 'warn');
     log('TMailor: Cloudflare verification timed out before Confirm became clickable', 'warn');
   }
   return false;
@@ -1035,7 +1384,7 @@ async function waitForMailboxControls(timeout = 20000) {
     if (handledInterstitialAd) {
       continue;
     }
-    await ensureCloudflareChallengeClearedOrThrow(Math.min(12000, Math.max(1000, timeout - (Date.now() - start))));
+    await ensureCloudflareChallengeClearedOrThrow(Math.min(DEFAULT_CLOUDFLARE_TIMEOUT_MS, Math.max(1000, timeout - (Date.now() - start))));
     assertNoManualTakeoverBlockers();
     const refreshedState = detectTmailorPageState();
     if (refreshedState.kind === 'mailbox_idle' || refreshedState.kind === 'mailbox_ready') {
@@ -1072,7 +1421,20 @@ async function fetchTmailorEmail(payload = {}) {
     domainState = {},
   } = payload || {};
 
-  await waitForMailboxControls();
+  try {
+    await waitForMailboxControls();
+  } catch (err) {
+    const message = String(err?.message || err);
+    if (/Cloudflare challenge detected on TMailor/i.test(message)) {
+      log('TMailor: Initial mailbox challenge handling failed. Requesting a background mailbox reload before retrying...', 'warn');
+      return {
+        recovery: 'reload_mailbox',
+        error: message,
+      };
+    } else {
+      throw err;
+    }
+  }
 
   const tryCurrentEmail = () => {
     const emails = collectDisplayedEmails();
@@ -1091,22 +1453,40 @@ async function fetchTmailorEmail(payload = {}) {
     }
   }
 
-  const newEmailButton = findNewEmailButton();
-  if (!newEmailButton) {
-    throw new Error('Could not find the TMailor "New Email" button.');
-  }
-
   let previousEmail = tryCurrentEmail();
 
-  for (let attempt = 1; attempt <= 25; attempt++) {
+  const maxGenerateAttempts = 100;
+
+  for (let attempt = 1; attempt <= maxGenerateAttempts; attempt++) {
     assertNoFatalMailboxError();
+    const newEmailButton = findNewEmailButton();
+    if (!newEmailButton) {
+      throw new Error('Could not find the TMailor "New Email" button.');
+    }
     simulateClick(newEmailButton);
-    log(`TMailor: Clicked New Email (${attempt}/25)`);
-    const clearedCloudflare = await ensureCloudflareChallengeClearedOrThrow(12000);
+    log(`TMailor: Clicked New Email (${attempt}/${maxGenerateAttempts})`);
+    let clearedCloudflare = false;
+    try {
+      clearedCloudflare = await ensureCloudflareChallengeClearedOrThrow(DEFAULT_CLOUDFLARE_TIMEOUT_MS);
+    } catch (err) {
+      const message = String(err?.message || err);
+      if (/Cloudflare challenge detected on TMailor/i.test(message)) {
+        log('TMailor: Cloudflare auto-attempt failed during mailbox generation. Requesting a background mailbox reload before retrying...', 'warn');
+        return {
+          recovery: 'reload_mailbox',
+          error: message,
+        };
+      } else {
+        throw err;
+      }
+    }
     assertNoManualTakeoverBlockers();
     await sleepWithMailboxPatrol(
       clearedCloudflare ? 3200 : 1200,
-      { reason: 'waiting for the new mailbox to generate' }
+      {
+        reason: 'waiting for the new mailbox to generate',
+        includeCloudflare: !clearedCloudflare,
+      }
     );
 
     await maybeChooseAllowedDomain(domainState);
@@ -1127,7 +1507,7 @@ async function fetchTmailorEmail(payload = {}) {
     }
   }
 
-  throw new Error('TMailor did not generate a whitelisted or non-blacklisted .com mailbox in time.');
+  throw new Error('TMailor did not generate a whitelisted or non-blacklisted .com mailbox in time. Switch to com+whitelist mode and retry.');
 }
 
 function extractVerificationCode(text) {
@@ -1215,7 +1595,7 @@ async function refreshInbox() {
   assertNoFatalMailboxError();
   await handleMonetizationVideoAd(15000);
   await handleDismissibleInterstitialAd(5000);
-  await ensureCloudflareChallengeClearedOrThrow(12000);
+  await ensureCloudflareChallengeClearedOrThrow(DEFAULT_CLOUDFLARE_TIMEOUT_MS);
   assertNoManualTakeoverBlockers();
 
   const refreshButton = findRefreshInboxButton();
@@ -1225,7 +1605,7 @@ async function refreshInbox() {
     assertNoFatalMailboxError();
     await handleMonetizationVideoAd(15000);
     await handleDismissibleInterstitialAd(5000);
-    await ensureCloudflareChallengeClearedOrThrow(12000);
+    await ensureCloudflareChallengeClearedOrThrow(DEFAULT_CLOUDFLARE_TIMEOUT_MS);
     assertNoManualTakeoverBlockers();
     return;
   }
@@ -1237,7 +1617,7 @@ async function refreshInbox() {
     assertNoFatalMailboxError();
     await handleMonetizationVideoAd(15000);
     await handleDismissibleInterstitialAd(5000);
-    await ensureCloudflareChallengeClearedOrThrow(12000);
+    await ensureCloudflareChallengeClearedOrThrow(DEFAULT_CLOUDFLARE_TIMEOUT_MS);
     assertNoManualTakeoverBlockers();
   }
 }
@@ -1252,7 +1632,7 @@ async function settleMailDetailInterruptions() {
   if (handledInterstitialAd) {
     log('TMailor: Mail detail view resumed after closing an interstitial overlay', 'info');
   }
-  await ensureCloudflareChallengeClearedOrThrow(12000);
+  await ensureCloudflareChallengeClearedOrThrow(DEFAULT_CLOUDFLARE_TIMEOUT_MS);
   assertNoManualTakeoverBlockers();
 }
 
@@ -1309,39 +1689,6 @@ function shouldReturnToInboxAfterDetailRead(step) {
   return step === 4 || step === 7;
 }
 
-function shouldReturnToMailboxHomeAfterOpeningDetail(step) {
-  return step === 7;
-}
-
-async function waitForMailDetailUrl(timeoutMs = 2000, intervalMs = 100) {
-  if (/emailid=/i.test(location.href)) {
-    return true;
-  }
-
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    throwIfStopped();
-    await sleep(Math.min(intervalMs, Math.max(0, timeoutMs - (Date.now() - start))));
-    if (/emailid=/i.test(location.href)) {
-      return true;
-    }
-  }
-
-  return /emailid=/i.test(location.href);
-}
-
-async function returnToMailboxHomePageFromDetail() {
-  const detailUrlDetected = await waitForMailDetailUrl(2000, 100);
-  if (detailUrlDetected) {
-    log('TMailor: Mail detail URL detected. Waiting briefly, then navigating back to the mailbox home page.', 'info');
-    await sleepWithMailboxPatrol(2000, { reason: 'leaving the login email detail view before returning home' });
-  } else {
-    log('TMailor: Mail detail URL did not settle in time. Navigating back to the mailbox home page directly.', 'info');
-  }
-  location.href = 'https://tmailor.com/';
-  await sleepWithMailboxPatrol(1200, { reason: 'returning to the mailbox home page' });
-}
-
 function readCodeFromCurrentDetailPage(step, payload = {}) {
   if (!/emailid=/i.test(location.href)) {
     return null;
@@ -1391,13 +1738,6 @@ async function waitForCodeInPage(timeoutMs = 4000, intervalMs = 250) {
   return null;
 }
 
-async function leaveMailDetailView() {
-  log('TMailor: Leaving the mail detail view by navigating directly to the mailbox home page.', 'info');
-  location.href = 'https://tmailor.com/';
-  await sleepWithMailboxPatrol(1200, { reason: 'returning to the mailbox home page' });
-  return true;
-}
-
 async function readCodeFromMailRow(row, step = 0) {
   let code = extractVerificationCode(row?.combinedText || '');
   if (code) {
@@ -1407,28 +1747,12 @@ async function readCodeFromMailRow(row, step = 0) {
   log(`TMailor: Opening matched inbox row (${row?.sender || 'unknown sender'} | ${row?.subject || 'unknown subject'})`, 'info');
   await clickMailRow(row);
   await settleMailDetailInterruptions();
-  if (shouldReturnToMailboxHomeAfterOpeningDetail(step)) {
-    log('TMailor: Step 7 opened the login email detail. Waiting briefly, then returning to the mailbox home page instead of reading the detail view.', 'info');
-    await returnToMailboxHomePageFromDetail();
-    return null;
-  }
   code = await waitForCodeInPage(8000, 250);
   if (code) {
-    if (shouldReturnToInboxAfterDetailRead(step)) {
-      await leaveMailDetailView();
-    }
     return code;
   }
 
-  log('TMailor: Mail detail opened but the verification code did not become visible in time; returning to inbox view.', 'info');
-  const leftDetailView = await leaveMailDetailView();
-  if (leftDetailView) {
-    await settleMailDetailInterruptions();
-    code = extractVerificationCode(normalizeText(row?.element?.textContent || ''));
-    if (code) {
-      return code;
-    }
-  }
+  log('TMailor: Mail detail opened but the verification code did not become visible in time. Leaving the detail page untouched so the next mailbox command can recover safely.', 'info');
 
   return null;
 }
@@ -1460,17 +1784,8 @@ async function handlePollEmail(step, payload) {
       await refreshInbox();
     }
 
-    if (shouldReturnToMailboxHomeAfterOpeningDetail(step) && /emailid=/i.test(location.href)) {
-      log('TMailor: Step 7 resumed on the login email detail page. Waiting briefly, then returning to the mailbox home page before continuing inbox polling.', 'info');
-      await returnToMailboxHomePageFromDetail();
-      continue;
-    }
-
     const currentDetailResult = readCodeFromCurrentDetailPage(step, payload);
     if (currentDetailResult && !excludedCodeSet.has(currentDetailResult.code)) {
-      if (shouldReturnToInboxAfterDetailRead(step)) {
-        await leaveMailDetailView();
-      }
       return {
         ok: true,
         ...currentDetailResult,
@@ -1537,6 +1852,7 @@ window.__MULTIPAGE_TMAILOR_TEST_HOOKS = {
   findMailRowOpenTarget,
   findMailRows,
   findCodeInPageText,
+  getCloudflareCheckboxRect,
   parseMailRow,
   runMailboxInterruptionSweep,
   waitForCloudflareConfirm,

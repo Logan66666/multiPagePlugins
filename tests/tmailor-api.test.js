@@ -70,6 +70,42 @@ test('fetchAllowedTmailorEmail keeps requesting new mailboxes until the domain p
   );
 });
 
+test('fetchAllowedTmailorEmail retries up to 100 times by default and suggests switching to com+whitelist mode on failure', async () => {
+  const attemptEvents = [];
+  let postCalls = 0;
+  const fetchImpl = async (_url, options = {}) => {
+    if (!options.method || options.method === 'GET') {
+      return createJsonResponse({ ok: true });
+    }
+
+    postCalls += 1;
+    return createJsonResponse({
+      msg: 'ok',
+      email: `blocked-${postCalls}@blocked.com`,
+      accesstoken: `token-${postCalls}`,
+    });
+  };
+
+  await assert.rejects(
+    () => fetchAllowedTmailorEmail({
+      fetchImpl,
+      domainState: normalizeTmailorDomainState({
+        mode: 'com_only',
+        blacklist: ['blocked.com'],
+      }),
+      onAttempt: async (event) => {
+        attemptEvents.push({ attempt: event.attempt, maxAttempts: event.maxAttempts });
+      },
+    }),
+    /Switch to com\+whitelist mode and retry\./i
+  );
+
+  assert.equal(postCalls, 100);
+  assert.equal(attemptEvents.length, 100);
+  assert.deepEqual(attemptEvents[0], { attempt: 1, maxAttempts: 100 });
+  assert.deepEqual(attemptEvents[99], { attempt: 100, maxAttempts: 100 });
+});
+
 test('pollTmailorVerificationCode returns the fresh ChatGPT code directly from inbox data', async () => {
   const now = new Date('2026-04-10T10:00:00.000Z').getTime();
   const fetchImpl = async (url, options = {}) => {

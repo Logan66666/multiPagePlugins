@@ -399,7 +399,7 @@
 
   async function fetchAllowedTmailorEmail(options) {
     const config = options || {};
-    const maxAttempts = Number.isFinite(config.maxAttempts) ? config.maxAttempts : 25;
+    const maxAttempts = Number.isFinite(config.maxAttempts) ? config.maxAttempts : 100;
 
     await warmupTmailorSession({
       fetchImpl: config.fetchImpl,
@@ -444,7 +444,7 @@
       }
     }
 
-    throw new Error('TMailor API did not generate a whitelisted or non-blacklisted .com mailbox in time.');
+    throw new Error('TMailor API did not generate a whitelisted or non-blacklisted .com mailbox in time. Switch to com+whitelist mode and retry.');
   }
 
   async function pollTmailorVerificationCode(options) {
