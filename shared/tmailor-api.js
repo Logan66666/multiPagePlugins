@@ -235,6 +235,9 @@
       ? config.sleep
       : (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+      if (typeof config.throwIfStopped === 'function') {
+        config.throwIfStopped();
+      }
     let lastError = null;
     for (let requestAttempt = 1; requestAttempt <= maxRequestRetries + 1; requestAttempt++) {
       try {
@@ -258,6 +261,9 @@
             error,
           });
         }
+          if (typeof config.throwIfStopped === 'function') {
+            config.throwIfStopped();
+          }
 
         if (waitMs > 0) {
           await sleep(waitMs);
@@ -491,6 +497,9 @@
     let lastListId = '';
     let lastApiError = null;
     const pendingMessages = new Map();
+      if (typeof config.throwIfStopped === 'function') {
+        config.throwIfStopped();
+      }
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (typeof config.onPollStart === 'function') {
@@ -509,6 +518,7 @@
           maxPollAttempts: maxAttempts,
           maxRequestRetries,
           retryDelayMs,
+          throwIfStopped: config.throwIfStopped,
           sleep,
           onRetry: config.onRetry,
           run: () => callTmailorApi({
@@ -527,6 +537,9 @@
       } catch (error) {
         lastApiError = error;
         if (attempt < maxAttempts) {
+            if (typeof config.throwIfStopped === 'function') {
+              config.throwIfStopped();
+            }
           if (intervalMs > 0) {
             await sleep(intervalMs);
           }
@@ -595,6 +608,7 @@
                 maxPollAttempts: maxAttempts,
                 maxRequestRetries,
                 retryDelayMs,
+                throwIfStopped: config.throwIfStopped,
                 sleep,
                 onRetry: config.onRetry,
                 run: () => readTmailorMessage({
@@ -636,6 +650,9 @@
 
         if (readFailed) {
           if (attempt < maxAttempts) {
+              if (typeof config.throwIfStopped === 'function') {
+                config.throwIfStopped();
+              }
             if (intervalMs > 0) {
               await sleep(intervalMs);
             }
@@ -645,6 +662,9 @@
         }
       }
 
+        if (typeof config.throwIfStopped === 'function') {
+          config.throwIfStopped();
+        }
       if (attempt < maxAttempts && intervalMs > 0) {
         await sleep(intervalMs);
       }

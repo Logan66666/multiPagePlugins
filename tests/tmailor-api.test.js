@@ -521,6 +521,49 @@ test('pollTmailorVerificationCode reports polling progress when the inbox is sti
       { attempt: 2, maxAttempts: 2, matchedCount: 0, candidateFound: false },
     ]
   );
+test('pollTmailorVerificationCode stops immediately when the caller signals a manual or round stop', async () => {
+  const now = new Date('2026-04-10T10:00:00.000Z').getTime();
+  let stopped = false;
+  let attempts = 0;
+
+  const fetchImpl = async (_url, options = {}) => {
+    const payload = JSON.parse(options.body);
+    if (payload.action !== 'listinbox') {
+      throw new Error(`Unexpected action: ${payload.action}`);
+    }
+
+    attempts += 1;
+    return createJsonResponse({
+      msg: 'ok',
+      code: `list-empty-${attempts}`,
+      data: {},
+    });
+  };
+
+  await assert.rejects(
+    () => pollTmailorVerificationCode({
+      fetchImpl,
+      accessToken: 'token-stop',
+      step: 7,
+      filterAfterTimestamp: now - 60_000,
+      maxAttempts: 5,
+      intervalMs: 3000,
+      now,
+      throwIfStopped() {
+        if (stopped) {
+          throw new Error('Flow stopped by user.');
+        }
+      },
+      sleep: async () => {
+        stopped = true;
+      },
+    }),
+    /Flow stopped by user\./i
+  );
+
+  assert.equal(attempts, 1);
+});
+
 });
 
 test('pollTmailorVerificationCode reports poll start before a hanging listinbox request times out', async () => {

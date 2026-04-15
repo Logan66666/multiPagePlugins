@@ -1367,6 +1367,8 @@ async function handleMessage(message, sender) {
         const result = await pollTmailorVerificationCode({
           accessToken: state.tmailorAccessToken,
           ...fetchConfig,
+          throwIfStopped,
+          sleep: sleepWithStop,
           onPollStart: async (event) => {
             await addLog(
               `Manual TMailor API code fetch: polling ${event.attempt}/${event.maxAttempts}...`,
@@ -2716,6 +2718,8 @@ async function pollVerificationCodeFromMail(step, mail, payload) {
         targetEmail: payload?.targetEmail,
         maxAttempts: payload?.maxAttempts,
         intervalMs: payload?.intervalMs,
+        throwIfStopped,
+        sleep: sleepWithStop,
         onPollStart: async (event) => {
           await addLog(
             `Step ${step}: TMailor API 开始轮询 ${event.attempt}/${event.maxAttempts}...`,
