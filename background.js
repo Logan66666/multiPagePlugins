@@ -40,7 +40,12 @@ const { addDuckMailRetryHint } = DuckMailErrors;
 const { isTmailorApiCaptchaError } = TmailorErrors;
 const { getTmailorApiOnlyPollingMessage, shouldUseTmailorApiMailboxOnly } = TmailorMailboxStrategy;
 const { buildManualTmailorCodeFetchConfig, getTmailorVerificationProfile } = TmailorVerificationProfiles;
-const { getContentScriptQueueTimeout, queueCommandForReinjection } = ContentScriptQueue;
+const {
+  buildContentScriptResponseTimeoutError,
+  getContentScriptQueueTimeout,
+  getContentScriptResponseTimeout,
+  queueCommandForReinjection,
+} = ContentScriptQueue;
 const { mergeLoginVerificationCodeExclusions } = LoginVerificationCodes;
 const { DEFAULT_EMAIL_SOURCE, generate33MailAddress, get33MailDomainForProvider, sanitizeEmailSource } = EmailAddresses;
 const { chooseMailProviderForAutoRun, getConfiguredRotatableMailProviders, getNextMailProviderAvailabilityTimestamp, isRotatableMailProvider, pruneMailProviderUsage, recordMailProviderUsage } = MailProviderRotation;
@@ -685,6 +690,27 @@ function queueCommand(source, message, timeout = 15000) {
 function flushCommand(source, tabId) {
   const pending = pendingCommands.get(source);
   if (pending) {
+function sendContentScriptMessageWithTimeout(tabId, source, message, timeoutMs = 0) {
+  const sendPromise = chrome.tabs.sendMessage(tabId, message);
+  if (!(timeoutMs > 0)) {
+    return sendPromise;
+  }
+
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(buildContentScriptResponseTimeoutError(source, timeoutMs)));
+    }, timeoutMs);
+  });
+  timeoutPromise.catch(() => {});
+
+  return Promise.race([sendPromise, timeoutPromise]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
+}
+
     clearTimeout(pending.timer);
     pendingCommands.delete(source);
     if (source === 'tmailor-mail') {
@@ -696,7 +722,10 @@ function flushCommand(source, tabId) {
           : 'mailbox work';
       void addLog(`TMailor: Content script is ready. Dispatching queued command for ${actionLabel}...`, 'info');
     }
-    chrome.tabs.sendMessage(tabId, pending.message).then(pending.resolve).catch(pending.reject);
+    const responseTimeout = getContentScriptResponseTimeout(source, pending.message?.type);
+    sendContentScriptMessageWithTimeout(tabId, source, pending.message, responseTimeout)
+      .then(pending.resolve)
+      .catch(pending.reject);
     console.log(LOG_PREFIX, `Flushed queued command to ${source} (tab ${tabId})`);
   }
 }
@@ -867,6 +896,7 @@ async function sendToContentScript(source, message) {
   const queueWaitHint = queueTimeout > 0
     ? `${Math.round(queueTimeout / 1000)}s timeout`
     : 'no timeout while waiting for manual takeover or challenge handling';
+  const responseTimeout = getContentScriptResponseTimeout(source, message?.type);
 
   if (!entry || !entry.ready) {
     console.log(LOG_PREFIX, `${source} not ready, queuing command`);
@@ -900,7 +930,7 @@ async function sendToContentScript(source, message) {
 
   console.log(LOG_PREFIX, `Sending to ${source} (tab ${entry.tabId}):`, message.type);
   try {
-    return await chrome.tabs.sendMessage(entry.tabId, message);
+    return await sendContentScriptMessageWithTimeout(entry.tabId, source, message, responseTimeout);
   } catch (err) {
     const errorMessage = err?.message || String(err || '');
     const recoverableDisconnect =

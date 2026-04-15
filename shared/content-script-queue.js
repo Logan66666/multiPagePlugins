@@ -7,6 +7,12 @@
 
   root.ContentScriptQueue = exports;
 })(typeof globalThis !== 'undefined' ? globalThis : self, function() {
+  function buildContentScriptResponseTimeoutError(source, timeoutMs) {
+    const normalizedSource = String(source || '').trim() || 'unknown';
+    const normalizedTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 0;
+    return `Content script on ${normalizedSource} did not respond in ${Math.round(normalizedTimeoutMs / 1000)}s. Try refreshing the tab and retry.`;
+  }
+
   function getContentScriptQueueTimeout(source, messageType) {
     const normalizedSource = String(source || '').trim();
     const normalizedType = String(messageType || '').trim();
@@ -22,6 +28,20 @@
     }
 
     return 15000;
+  }
+
+  function getContentScriptResponseTimeout(source, messageType) {
+    const normalizedSource = String(source || '').trim();
+    const normalizedType = String(messageType || '').trim();
+
+    if (normalizedSource === 'tmailor-mail') {
+      if (normalizedType === 'FETCH_TMAILOR_EMAIL' || normalizedType === 'POLL_EMAIL') {
+        return 0;
+      }
+      return 0;
+    }
+
+    return 60000;
   }
 
   async function queueCommandForReinjection(options = {}) {
@@ -48,7 +68,9 @@
   }
 
   return {
+    buildContentScriptResponseTimeoutError,
     getContentScriptQueueTimeout,
+    getContentScriptResponseTimeout,
     queueCommandForReinjection,
   };
 });
