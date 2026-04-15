@@ -1,5 +1,5 @@
 // content/signup-page.js — Content script for OpenAI auth pages (steps 2, 3, 4-receive, 5)
-// Injected on: auth0.openai.com, auth.openai.com, accounts.openai.com
+// Injected on: auth0.openai.com, auth.openai.com, accounts.openai.com, platform.openai.com
 
 (function() {
 if (window.__MULTIPAGE_SIGNUP_PAGE_LOADED) {
@@ -77,10 +77,29 @@ async function step2_clickRegister() {
   log('Step 2: Looking for Register/Sign up button...');
   throwIfUnsupportedCountryRegionTerritoryBlocked(2);
 
+  await waitForPlatformEntryStateToSettle();
+  await logoutFromPlatformChatSessionIfNeeded();
+
   if (isDirectSignupFormVisible()) {
     log('Step 2: Official signup form is already visible. Continuing without clicking Register.', 'info');
     reportComplete(2);
     return;
+  }
+
+  if (isCreateAccountSessionEndedPage()) {
+    const loginEntryButton = await waitForElementByText(
+      'a, button, [role="button"], [role="link"]',
+      /登录|log\s*in|continue|继续/i,
+      5000
+    ).catch(() => null);
+
+    if (loginEntryButton) {
+      await humanPause(450, 1200);
+      reportComplete(2);
+      simulateClick(loginEntryButton);
+      log('Step 2: create-account opened a session-ended landing page, clicked the primary continue/login button.', 'warn');
+      return;
+    }
   }
 
   let registerBtn = null;
@@ -108,6 +127,319 @@ async function step2_clickRegister() {
   log('Step 2: Clicked Register button');
 }
 
+function isPlatformLoginEntryPage() {
+  return /platform\.openai\.com\/login/i.test(location.href);
+}
+
+function isPlatformHomeRedirectPage() {
+  return /platform\.openai\.com\/home/i.test(location.href);
+}
+
+async function waitForPlatformEntryStateToSettle(timeout = 8000) {
+  if (!(isPlatformLoginEntryPage() || isPlatformHomeRedirectPage() || isPlatformChatSessionPage())) {
+    return null;
+  }
+
+  const start = Date.now();
+  let sawPlatformRedirect = false;
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    if (isPlatformChatSessionPage()) {
+      return 'chat';
+    }
+
+    if (isDirectSignupFormVisible()) {
+      return 'login';
+    }
+
+    if (isPlatformHomeRedirectPage()) {
+      sawPlatformRedirect = true;
+    }
+
+    await sleep(250);
+  }
+
+  if (isPlatformChatSessionPage()) {
+    return 'chat';
+  }
+
+  if (isDirectSignupFormVisible()) {
+    return 'login';
+  }
+
+  if (sawPlatformRedirect) {
+    log('Step 2: Platform entry stayed on the redirect bridge longer than expected. Proceeding with the current page state...', 'warn');
+  }
+
+  return null;
+}
+
+async function logoutFromPlatformChatSessionIfNeeded() {
+  if (!isPlatformChatSessionPage()) {
+    return false;
+  }
+
+  log('Step 2: Platform login entry redirected into an active chat session. Logging out first...', 'warn');
+
+  const accountMenuButton = await ensurePlatformAccountMenuButtonVisible(10000);
+
+  if (!accountMenuButton) {
+    throw new Error('Platform chat session is already signed in, but the account menu button could not be found for logout.');
+  }
+
+  const logoutLabel = await openPlatformAccountMenu(accountMenuButton);
+
+  if (!logoutLabel) {
+    throw new Error('Platform chat session is already signed in, but the logout action did not appear after opening the account menu.');
+  }
+
+  await clickPlatformLogoutAction(logoutLabel);
+  await waitForPlatformLogoutRedirect();
+  log('Step 2: Logged out of the existing platform chat session and returned to the login page.', 'warn');
+  return true;
+}
+
+function isPlatformChatSessionPage() {
+  return /platform\.openai\.com\/chat/i.test(location.href);
+}
+
+function isPlatformResponsiveShellMenuButton(button) {
+  if (!button || !isElementVisible(button)) {
+    return false;
+  }
+
+  if (button.getAttribute?.('aria-haspopup') === 'menu') {
+    return false;
+  }
+
+  if (typeof button.className === 'string' && /\bp9Ilg\b/.test(button.className)) {
+    return true;
+  }
+
+  return Boolean(
+    button.querySelector?.('[data-top="true"]')
+    && button.querySelector?.('[data-bottom="true"]')
+  );
+}
+
+function findPlatformResponsiveShellMenuButton() {
+  const buttons = Array.from(document.querySelectorAll('button'));
+  return buttons.find((button) => isPlatformResponsiveShellMenuButton(button)) || null;
+}
+
+function findPlatformAccountMenuButton() {
+  const selectors = [
+    'button[aria-haspopup="menu"]',
+    'button[id^="radix-"][aria-haspopup="menu"]',
+    'button[id^="radix-"]',
+  ];
+
+  for (const selector of selectors) {
+    const matches = Array.from(document.querySelectorAll(selector));
+    const found = matches.find((button) => {
+      if (!isElementVisible(button) || isPlatformResponsiveShellMenuButton(button)) {
+        return false;
+      }
+      const ariaHaspopup = String(button.getAttribute?.('aria-haspopup') || '').toLowerCase();
+      const ariaExpanded = String(button.getAttribute?.('aria-expanded') || '').toLowerCase();
+      const dataState = String(button.getAttribute?.('data-state') || '').toLowerCase();
+      return ariaHaspopup === 'menu'
+        || ariaExpanded === 'true'
+        || ariaExpanded === 'false'
+        || dataState === 'open'
+        || dataState === 'closed';
+    });
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
+}
+
+function normalizePlatformMenuText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function isExactPlatformLogoutText(value) {
+  return /^(?:log\s*out|退出登录|退出)$/i.test(normalizePlatformMenuText(value));
+}
+
+function findPlatformLogoutLabel() {
+  const candidates = Array.from(document.querySelectorAll('button, [role="menuitem"], [role="button"], a, div, span'));
+  const exactMatches = candidates.filter((el) => isElementVisible(el) && isExactPlatformLogoutText(el.textContent || ''));
+  const preferredMatch = exactMatches.find((el) => /\bwU7SW\b/.test(String(el.className || '')));
+  return preferredMatch || exactMatches[0] || null;
+}
+
+function isPlatformAccountMenuExpanded(button) {
+  if (findPlatformLogoutLabel()) {
+    return true;
+  }
+
+  if (!button) {
+    return false;
+  }
+
+  const expanded = String(button.getAttribute?.('aria-expanded') || '').toLowerCase();
+  const state = String(button.getAttribute?.('data-state') || '').toLowerCase();
+  return expanded === 'true' || state === 'open';
+}
+
+function dispatchPointerClickSequence(target) {
+  if (!target) {
+    return;
+  }
+
+  target.focus?.();
+  const eventTypes = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+  for (const type of eventTypes) {
+    target.dispatchEvent?.(new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 0,
+      buttons: type === 'pointerdown' || type === 'mousedown' ? 1 : 0,
+    }));
+  }
+}
+
+async function waitForPlatformAccountMenuOpen(button, timeout = 1500) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const logoutLabel = findPlatformLogoutLabel();
+    if (logoutLabel) {
+      return logoutLabel;
+    }
+
+    if (isPlatformAccountMenuExpanded(button)) {
+      return findPlatformLogoutLabel();
+    }
+
+    await sleep(100);
+  }
+
+  return findPlatformLogoutLabel();
+}
+
+async function waitForPlatformAccountMenuButton(timeout = 1800) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+    const button = findPlatformAccountMenuButton();
+    if (button) {
+      return button;
+    }
+    await sleep(100);
+  }
+
+  return findPlatformAccountMenuButton();
+}
+
+async function openPlatformResponsiveShellMenu(button) {
+  await humanPause(300, 850);
+  simulateClick(button);
+
+  let accountButton = await waitForPlatformAccountMenuButton(1200);
+  if (accountButton) {
+    return accountButton;
+  }
+
+  log('Step 2: Platform shell menu did not reveal the avatar after the first click. Retrying with a low-level pointer sequence...', 'warn');
+  dispatchPointerClickSequence(button);
+  accountButton = await waitForPlatformAccountMenuButton(1800);
+  return accountButton;
+}
+
+async function ensurePlatformAccountMenuButtonVisible(timeout = 10000) {
+  const start = Date.now();
+  let shellMenuAttempted = false;
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const accountButton = findPlatformAccountMenuButton();
+    if (accountButton) {
+      return accountButton;
+    }
+
+    const shellMenuButton = findPlatformResponsiveShellMenuButton();
+    if (shellMenuButton && !shellMenuAttempted) {
+      shellMenuAttempted = true;
+      log('Step 2: Platform chat is using the responsive shell menu. Opening it before looking for the avatar menu...', 'info');
+      const revealedAccountButton = await openPlatformResponsiveShellMenu(shellMenuButton);
+      if (revealedAccountButton) {
+        return revealedAccountButton;
+      }
+    }
+
+    await sleep(150);
+  }
+
+  return findPlatformAccountMenuButton();
+}
+
+async function openPlatformAccountMenu(button) {
+  await humanPause(400, 1100);
+  simulateClick(button);
+
+  let logoutLabel = await waitForPlatformAccountMenuOpen(button, 1200);
+  if (logoutLabel) {
+    return logoutLabel;
+  }
+
+  log('Step 2: Platform account menu did not open after the first avatar click. Retrying with a low-level pointer sequence...', 'warn');
+  dispatchPointerClickSequence(button);
+  logoutLabel = await waitForPlatformAccountMenuOpen(button, 1800);
+  return logoutLabel;
+}
+
+function resolveLogoutMenuTarget(el) {
+  return el?.closest?.('[id^="radix-"], [data-radix-collection-item], button, [role="menuitem"], [role="button"], a, li')
+    || el?.parentElement?.closest?.('[id^="radix-"], [data-radix-collection-item], button, [role="menuitem"], [role="button"], a, li')
+    || el?.parentElement
+    || el;
+}
+
+async function clickPlatformLogoutAction(logoutLabel) {
+  const target = resolveLogoutMenuTarget(logoutLabel);
+
+  await humanPause(350, 1000);
+  simulateClick(target);
+
+  await sleep(200);
+  if (!isPlatformChatSessionPage()) {
+    return true;
+  }
+
+  log('Step 2: Logout menu item did not navigate away after the first click. Retrying with a low-level pointer sequence...', 'warn');
+  dispatchPointerClickSequence(target);
+  await sleep(250);
+  return !isPlatformChatSessionPage();
+}
+
+async function waitForPlatformLogoutRedirect(timeout = 15000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    if (/(auth\.openai\.com\/log-in|platform\.openai\.com\/login)/i.test(location.href)) {
+      return true;
+    }
+
+    await sleep(250);
+  }
+
+  throw new Error('Timed out waiting for the platform chat logout redirect to return to the login page.');
+}
+
 function throwIfUnsupportedCountryRegionTerritoryBlocked(step, text = getVisiblePageText()) {
   if (isUnsupportedCountryRegionTerritoryText(text)) {
     throw new Error(getUnsupportedCountryRegionTerritoryMessage(step));
@@ -115,10 +447,18 @@ function throwIfUnsupportedCountryRegionTerritoryBlocked(step, text = getVisible
 }
 
 function isDirectSignupFormVisible() {
-  if (!/(create-account|\/u\/signup\/)/i.test(location.href)) {
+  if (!/(platform\.openai\.com\/login|create-account|\/u\/signup\/|\/log-?in)/i.test(location.href)) {
     return false;
   }
   return hasVisibleCredentialInput();
+}
+
+function isCreateAccountSessionEndedPage(text = getVisiblePageText()) {
+  if (!/create-account/i.test(location.href)) {
+    return false;
+  }
+
+  return /你的会话已结束|session has ended|session ended|登录以继续|log in to continue|chatgpt\.com/i.test(text);
 }
 
 // ============================================================
@@ -151,52 +491,53 @@ async function step3_fillEmailPassword(payload) {
   fillInput(emailInput, email);
   log('Step 3: Email filled');
 
-  // Check if password field is on the same page
-  let passwordInput = document.querySelector('input[type="password"]');
+  const inlineCredentialChoice = findStep3ImmediateCredentialChoice();
+  if (inlineCredentialChoice?.passwordInput) {
+    log('Step 3: Password field is already visible on the same page. Filling password before the first continue click...');
+    await submitStep3WithPassword(payload, inlineCredentialChoice.passwordInput);
+    reportComplete(3, { email });
+    return;
+  }
+  if (inlineCredentialChoice?.otpButton) {
+    await humanPause(450, 1200);
+    simulateClick(inlineCredentialChoice.otpButton);
+    log('Step 3: Selected one-time-code login for registration.');
+    reportComplete(3, { email, usesOneTimeCode: true });
+    return;
+  }
 
+  log('Step 3: Submitting email and checking whether one-time-code login is available...');
+  const emailSubmitBtn = document.querySelector('button[type="submit"]')
+    || await waitForElementByText('button', /continue|next|submit|继续|下一步/i, 5000).catch(() => null);
+
+  if (emailSubmitBtn) {
+    await humanPause(400, 1100);
+    simulateClick(emailSubmitBtn);
+    log('Step 3: Submitted email, waiting for passwordless login or password field...');
+    await sleep(2000);
+  }
+
+  const passwordlessChoice = await waitForPasswordlessOrPasswordField();
+  if (passwordlessChoice?.otpButton) {
+    await humanPause(450, 1200);
+    simulateClick(passwordlessChoice.otpButton);
+    log('Step 3: Selected one-time-code login for registration.');
+    reportComplete(3, { email, usesOneTimeCode: true });
+    return;
+  }
+
+  const passwordInput = passwordlessChoice?.passwordInput || null;
   if (!passwordInput) {
-    // Need to submit email first to get to password page
-    log('Step 3: No password field yet, submitting email first...');
-    const submitBtn = document.querySelector('button[type="submit"]')
-      || await waitForElementByText('button', /continue|next|submit|继续|下一步/i, 5000).catch(() => null);
-
-    if (submitBtn) {
-      await humanPause(400, 1100);
-      simulateClick(submitBtn);
-      log('Step 3: Submitted email, waiting for password field...');
-      await sleep(2000);
+    throwIfAuthOperationTimedOut(3);
+    if (isAuthFatalErrorText(getVisiblePageText())) {
+      throw new Error('Auth fatal error page detected before the password input appeared.');
     }
-
-    try {
-      passwordInput = await waitForElement('input[type="password"]', 10000);
-    } catch {
-      throwIfAuthOperationTimedOut(3);
-      if (isAuthFatalErrorText(getVisiblePageText())) {
-        throw new Error('Auth fatal error page detected before the password input appeared.');
-      }
-      throw new Error('Could not find password input after submitting email. URL: ' + location.href);
-    }
+    throw new Error('Could not find passwordless-login button or password input after submitting email. URL: ' + location.href);
   }
 
   if (!payload.password) throw new Error('No password provided. Step 3 requires a generated password.');
-  await humanPause(600, 1500);
-  fillInput(passwordInput, payload.password);
-  log('Step 3: Password filled');
-
-  // Report complete BEFORE submit, because submit causes page navigation
-  // which kills the content script connection
+  await submitStep3WithPassword(payload, passwordInput);
   reportComplete(3, { email });
-
-  // Submit the form (page will navigate away after this)
-  await sleep(500);
-  const submitBtn = document.querySelector('button[type="submit"]')
-    || await waitForElementByText('button', /continue|sign\s*up|submit|注册|创建|create/i, 5000).catch(() => null);
-
-  if (submitBtn) {
-    await humanPause(500, 1300);
-    simulateClick(submitBtn);
-    log('Step 3: Form submitted');
-  }
 }
 
 function throwIfAuthOperationTimedOut(step, text = getVisiblePageText()) {
@@ -382,6 +723,7 @@ function getAuthPageState() {
 
 function hasVisibleCredentialInput() {
   const selectors = [
+    'input#login-email',
     'input[type="email"]',
     'input[name="email"]',
     'input[name="username"]',
@@ -512,6 +854,95 @@ async function step6_login(payload) {
   // No password field — OTP flow
   log('Step 6: No password field. OTP flow or auto-redirect.');
   reportComplete(6, { needsOTP: true, ...(latestPageOauthUrl ? { oauthUrl: latestPageOauthUrl } : {}) });
+}
+
+async function waitForPasswordlessOrPasswordField(timeout = 10000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const passwordInput = findVisiblePasswordInput();
+    if (passwordInput) {
+      return {
+        passwordInput,
+        reason: 'password-field',
+      };
+    }
+
+    const otpButton = findPasswordlessLoginButton();
+    if (otpButton) {
+      return {
+        otpButton,
+        reason: 'passwordless-login-button',
+      };
+    }
+
+    await sleep(250);
+  }
+
+  return null;
+}
+
+function findStep3ImmediateCredentialChoice() {
+  const passwordInput = findVisiblePasswordInput();
+  if (passwordInput) {
+    return {
+      passwordInput,
+      reason: 'inline-password-field',
+    };
+  }
+
+  const otpButton = findPasswordlessLoginButton();
+  if (otpButton) {
+    return {
+      otpButton,
+      reason: 'inline-passwordless-login-button',
+    };
+  }
+
+  return null;
+}
+
+async function submitStep3WithPassword(payload, passwordInput) {
+  if (!payload.password) throw new Error('No password provided. Step 3 requires a generated password.');
+  await humanPause(600, 1500);
+  fillInput(passwordInput, payload.password);
+  log('Step 3: Password filled');
+
+  await sleep(500);
+  const passwordSubmitBtn = document.querySelector('button[type="submit"]')
+    || await waitForElementByText('button', /continue|sign\s*up|submit|注册|创建|create|继续/i, 5000).catch(() => null);
+
+  if (passwordSubmitBtn) {
+    await humanPause(500, 1300);
+    simulateClick(passwordSubmitBtn);
+    log('Step 3: Form submitted');
+  }
+}
+
+function findPasswordlessLoginButton() {
+  const selectors = [
+    'button[name="intent"][value="passwordless_login_send_otp"]',
+    'button[value="passwordless_login_send_otp"]',
+  ];
+
+  for (const selector of selectors) {
+    const button = document.querySelector(selector);
+    if (button && isElementVisible(button)) {
+      return button;
+    }
+  }
+
+  const buttons = Array.from(document.querySelectorAll('button, [role="button"], a'));
+  for (const button of buttons) {
+    const text = String(button.textContent || '').trim();
+    if (/使用一次性验证码登录|one-time code|one time code|passwordless/i.test(text) && isElementVisible(button)) {
+      return button;
+    }
+  }
+
+  return null;
 }
 
 async function resolveLatestPageOauthUrl() {
