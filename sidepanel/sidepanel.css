@@ -1135,6 +1135,19 @@ header {
   gap: 6px;
 }
 
+.log-copy-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  justify-content: center;
+}
+
+.log-copy-btn svg {
+  width: 13px;
+  height: 13px;
+  stroke: currentColor;
+}
+
 .log-round-label {
   min-width: 96px;
   text-align: center;

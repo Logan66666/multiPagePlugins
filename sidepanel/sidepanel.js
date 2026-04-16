@@ -27,6 +27,7 @@ const stepsProgress = document.getElementById('steps-progress');
 const btnAutoRun = document.getElementById('btn-auto-run');
 const autoContinueBar = document.getElementById('auto-continue-bar');
 const autoContinueHint = document.getElementById('auto-continue-hint');
+const btnCopyLogRound = document.getElementById('btn-copy-log-round');
 const btnLogRoundPrev = document.getElementById('btn-log-round-prev');
 const btnLogRoundNext = document.getElementById('btn-log-round-next');
 const displayLogRound = document.getElementById('display-log-round');
@@ -77,6 +78,7 @@ const {
   getEmailInputPlaceholder,
 } = SidepanelSettings;
 const { shouldDisableStepButton, shouldEnableStopButton } = ManualStepControls;
+const { buildLogRoundClipboardText } = SidepanelLogCopy;
 const { isLogNearBottom, shouldShowScrollToBottomButton } = SidepanelLogScroll;
 const {
   buildRunFailureSummaryHtml,
@@ -295,6 +297,9 @@ function updateLogRoundControls() {
   const selectedRound = getSelectedLogRound();
   const roundCount = logRoundsState.length;
 
+  if (btnCopyLogRound) {
+    btnCopyLogRound.disabled = roundCount <= 0;
+  }
   if (btnLogRoundPrev) {
     btnLogRoundPrev.disabled = roundCount <= 1 || selectedIndex <= 0;
   }
@@ -715,13 +720,16 @@ async function copyFieldValue(input, emptyMessage, successMessage) {
   }
 }
 
-async function copyTextValue(value, successMessage) {
+async function copyTextValue(value, successMessage, failureMessage = '') {
   try {
     await navigator.clipboard.writeText(String(value || ''));
     showToast(successMessage, 'success', 2500);
     return true;
   } catch (err) {
-    showToast(`Current code: ${value} (clipboard unavailable: ${err.message})`, 'warn', 4200);
+    const fallbackMessage = failureMessage
+      ? `${failureMessage}: ${err.message}`
+      : `Current code: ${value} (clipboard unavailable: ${err.message})`;
+    showToast(fallbackMessage, 'warn', 4200);
     return false;
   }
 }
@@ -745,6 +753,9 @@ function renderStaticActionButtons() {
   btnCopyLocalhostUrl.innerHTML = ACTION_ICONS.copy;
   btnCopyEmail.innerHTML = ACTION_ICONS.copy;
   btnCopyPassword.innerHTML = ACTION_ICONS.copy;
+  if (btnCopyLogRound) {
+    btnCopyLogRound.innerHTML = ACTION_ICONS.copy;
+  }
   renderTmailorApiCodeButton(false);
 }
 
@@ -1173,6 +1184,23 @@ btnCopyEmail.addEventListener('click', async () => {
 btnCopyPassword.addEventListener('click', async () => {
   await copyFieldValue(inputPassword, 'Password is empty', 'Password copied');
 });
+
+if (btnCopyLogRound) {
+  btnCopyLogRound.addEventListener('click', async () => {
+    const selectedRound = getSelectedLogRound();
+    if (!selectedRound) {
+      showToast('No log page available to copy', 'warn', 2500);
+      return;
+    }
+
+    const copied = await copyTextValue(
+      buildLogRoundClipboardText(selectedRound),
+      'Current page logs copied',
+      'Copy logs failed'
+    );
+    if (!copied) return;
+  });
+}
 
 btnTogglePassword.addEventListener('click', () => {
   inputPassword.type = inputPassword.type === 'password' ? 'text' : 'password';
