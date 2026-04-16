@@ -170,6 +170,10 @@ test('shouldBlacklistTmailorDomainForError blacklists non-whitelisted .com domai
     true
   );
   assert.equal(
+    shouldBlacklistTmailorDomainForError(state, 'unknown-good.com', 'Step 4 failed: 验证过程中出错 (unsupported_email)。请重试。'),
+    true
+  );
+  assert.equal(
     shouldBlacklistTmailorDomainForError(state, 'unknown-good.com', 'Step 8 blocked: auth page still requires phone verification.'),
     true
   );

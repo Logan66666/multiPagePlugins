@@ -389,7 +389,8 @@
 
     const matchesEmailUnsupported =
       message.includes('email domain is unsupported') ||
-      message.includes('unsupported email');
+      message.includes('unsupported email') ||
+      message.includes('unsupported_email');
     const matchesPhoneVerification =
       message.includes('phone number is required on the auth page') ||
       message.includes('phone verification') ||
