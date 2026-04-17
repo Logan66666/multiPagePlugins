@@ -11,12 +11,26 @@
     "storage",
     "alarms",
     "scripting",
+    "permissions",
     "activeTab",
     "clipboardRead",
     "clipboardWrite"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://tmailor.com/*",
+    "https://challenges.cloudflare.com/*",
+    "https://platform.openai.com/*",
+    "https://auth0.openai.com/*",
+    "https://auth.openai.com/*",
+    "https://accounts.openai.com/*",
+    "https://mail.qq.com/*",
+    "https://wx.mail.qq.com/*",
+    "https://mail.163.com/*",
+    "https://duckduckgo.com/email/settings/autofill*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js"

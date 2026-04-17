@@ -379,6 +379,18 @@ async function refreshLogHistoryFromBackground() {
   }
 }
 
+async function refreshTrustedStateDisplay() {
+  try {
+    const state = await chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' });
+    updateStatusDisplay(state);
+    syncPasswordField(state);
+    setDisplayValue(displayOauthUrl, state.oauthUrl);
+    setDisplayValue(displayLocalhostUrl, state.localhostUrl);
+  } catch (err) {
+    console.error('Failed to refresh trusted state:', err);
+  }
+}
+
 function handleIncomingLogEntry(payload) {
   const entry = payload?.entry || payload;
   if (!entry || typeof entry.message !== 'string') {
@@ -1629,18 +1641,14 @@ chrome.runtime.onMessage.addListener((message) => {
       updateStepUI(step, status);
       chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' }).then(updateStatusDisplay);
       if (status === 'completed') {
-        chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' }).then(state => {
-          syncPasswordField(state);
-          if (state.oauthUrl) {
-            setDisplayValue(displayOauthUrl, state.oauthUrl);
-          }
-          if (state.localhostUrl) {
-            setDisplayValue(displayLocalhostUrl, state.localhostUrl);
-          }
-        });
+        refreshTrustedStateDisplay();
       }
       break;
     }
+
+    case 'TRUSTED_STATE_UPDATED':
+      refreshTrustedStateDisplay();
+      break;
 
     case 'AUTO_RUN_RESET': {
       // Full UI reset for next run
@@ -1662,9 +1670,6 @@ chrome.runtime.onMessage.addListener((message) => {
       if (message.payload.email) {
         inputEmail.value = message.payload.email;
       }
-      if (message.payload.password !== undefined) {
-        inputPassword.value = message.payload.password || '';
-      }
       if (message.payload.mailProvider) {
         selectMailProvider.value = message.payload.mailProvider;
         updateMailProviderUI();
@@ -1680,12 +1685,6 @@ chrome.runtime.onMessage.addListener((message) => {
       }
       if (message.payload.autoRunStats) {
         updateAutoRunStatsDisplay(message.payload.autoRunStats);
-      }
-      if (message.payload.oauthUrl) {
-        setDisplayValue(displayOauthUrl, message.payload.oauthUrl);
-      }
-      if (message.payload.localhostUrl) {
-        setDisplayValue(displayLocalhostUrl, message.payload.localhostUrl);
       }
       break;
     }

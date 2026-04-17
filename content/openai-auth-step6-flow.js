@@ -44,7 +44,7 @@ async function step6_login(payload) {
     log('Step 6: Password field found, filling password...');
     await humanPause(550, 1450);
     fillInput(passwordInput, password);
-    log(`Step 6: Password filled: ${password}`);
+    log('Step 6: Password filled');
 
     await sleep(500);
     const submitBtn2 = document.querySelector('button[type="submit"]')

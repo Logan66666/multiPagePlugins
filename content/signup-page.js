@@ -1606,7 +1606,7 @@ async function submitStep3WithPassword(payload, passwordInput) {
   if (!payload.password) throw new Error('No password provided. Step 3 requires a generated password.');
   await humanPause(600, 1500);
   fillInput(passwordInput, payload.password);
-  log(`Step 3: Password filled: ${payload.password}`);
+  log('Step 3: Password filled');
 
   await sleep(500);
   const submissionStartUrl = location.href;
@@ -1717,7 +1717,7 @@ async function resolveLatestPageOauthUrl() {
   }
 
   try {
-    const state = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
+    const state = await chrome.runtime.sendMessage({ type: 'GET_RUNTIME_STATE' });
     const savedOauthUrl = String(state?.oauthUrl || '').trim();
     if (!savedOauthUrl || savedOauthUrl !== pageOauthUrl) {
       log(`Step 6: Detected newer OAuth URL on the page, using it instead of the saved panel value.`);

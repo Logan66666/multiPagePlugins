@@ -3248,8 +3248,12 @@ test('step 6 fails instead of completing when the login page shows incorrect ema
 
   assert.match(response?.error || '', /incorrect email address or password/i);
   assert.ok(
-    logs.includes('Step 6: Password filled: wrong-pass'),
-    `expected password log, got ${JSON.stringify(logs)}`
+    logs.includes('Step 6: Password filled'),
+    `expected redacted password log, got ${JSON.stringify(logs)}`
+  );
+  assert.ok(
+    !logs.some((entry) => entry.includes('wrong-pass')),
+    `expected password to stay out of logs, got ${JSON.stringify(logs)}`
   );
   assert.deepEqual(context.__completions, []);
   assert.deepEqual(context.__errors, [
@@ -3432,7 +3436,7 @@ test('step 6 clicks the return-home recovery link on auth issue pages before fai
 });
 
 
-test('step 6 reports the latest page oauth url when it differs from the saved panel value', async () => {
+test('step 6 reports the latest page oauth url while using sanitized runtime state', async () => {
   const state = {
     bodyText: '输入密码',
     passwordVisible: false,
@@ -3485,7 +3489,7 @@ test('step 6 reports the latest page oauth url when it differs from the saved pa
 
   context.chrome.runtime.sendMessage = (message) => {
     runtimeMessages.push(message);
-    if (message?.type === 'GET_STATE') {
+    if (message?.type === 'GET_RUNTIME_STATE') {
       return Promise.resolve({ oauthUrl: 'https://auth.openai.com/api/oauth/authorize?client_id=panel-old' });
     }
     return Promise.resolve({ ok: true });
@@ -3520,8 +3524,8 @@ test('step 6 reports the latest page oauth url when it differs from the saved pa
     }
   );
   assert.ok(
-    runtimeMessages.some((message) => message?.type === 'GET_STATE'),
-    'expected step 6 to read the saved oauth url before deciding whether to override it'
+    runtimeMessages.some((message) => message?.type === 'GET_RUNTIME_STATE'),
+    'expected step 6 to use sanitized runtime state before deciding whether to override the oauth url'
   );
 });
 

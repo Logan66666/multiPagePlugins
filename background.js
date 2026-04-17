@@ -141,7 +141,31 @@ const RECLAIM_SOURCE_CONFIG = {
   },
 };
 
-initializeSessionStorageAccess();
+const SENSITIVE_STATE_KEYS = [
+  'password',
+  'customPassword',
+  'oauthUrl',
+  'localhostUrl',
+  'accounts',
+  'tmailorAccessToken',
+  'emailLease',
+  'lastSignupVerificationCode',
+  'logs',
+  'logRounds',
+];
+
+const SENSITIVE_DATA_UPDATE_KEYS = new Set([
+  'password',
+  'customPassword',
+  'oauthUrl',
+  'localhostUrl',
+  'accounts',
+  'tmailorAccessToken',
+  'emailLease',
+  'lastSignupVerificationCode',
+  'logs',
+  'logRounds',
+]);
 
 let automationWindowId = null;
 
@@ -168,7 +192,7 @@ function normalizeLogEntry(entry) {
   }
 
   return {
-    message: entry.message,
+    message: redactLogMessage(entry.message),
     level: typeof entry.level === 'string' ? entry.level : 'info',
     timestamp: Number.isFinite(entry.timestamp) ? entry.timestamp : Date.now(),
   };
@@ -347,21 +371,20 @@ async function getState() {
   return { ...DEFAULT_STATE, ...sessionState, ...persistentSettings, tmailorDomainState, autoRunStats };
 }
 
-async function initializeSessionStorageAccess() {
-  try {
-    if (chrome.storage?.session?.setAccessLevel) {
-      await chrome.storage.session.setAccessLevel({
-        accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS',
-      });
-      console.log(LOG_PREFIX, 'Enabled storage.session for content scripts');
-    }
-  } catch (err) {
-    console.warn(LOG_PREFIX, 'Failed to enable storage.session for content scripts:', err?.message || err);
+function sanitizeRuntimeState(state = {}) {
+  const safeState = { ...state };
+  for (const key of SENSITIVE_STATE_KEYS) {
+    delete safeState[key];
   }
+  return safeState;
+}
+
+function isTrustedSidePanelRequest(message, sender) {
+  return message?.source === 'sidepanel' && !sender?.tab;
 }
 
 async function setState(updates) {
-  console.log(LOG_PREFIX, 'storage.set:', JSON.stringify(updates).slice(0, 200));
+  console.log(LOG_PREFIX, 'storage.set keys:', Object.keys(updates || {}).join(','));
   await chrome.storage.session.set(updates);
 }
 
@@ -502,10 +525,71 @@ async function setPersistentSettings(updates) {
 }
 
 function broadcastDataUpdate(payload) {
+  const safePayload = sanitizeDataUpdatePayload(payload);
+  if (!Object.keys(safePayload).length) {
+    return;
+  }
   chrome.runtime.sendMessage({
     type: 'DATA_UPDATED',
-    payload,
+    payload: safePayload,
   }).catch(() => {});
+}
+
+function sanitizeDataUpdatePayload(payload = {}) {
+  const safePayload = {};
+  for (const [key, value] of Object.entries(payload || {})) {
+    if (!SENSITIVE_DATA_UPDATE_KEYS.has(key)) {
+      safePayload[key] = value;
+    }
+  }
+  return safePayload;
+}
+
+function broadcastTrustedStateUpdated() {
+  chrome.runtime.sendMessage({
+    type: 'TRUSTED_STATE_UPDATED',
+  }).catch(() => {});
+}
+
+function getOriginPermissionPatternFromUrl(url) {
+  try {
+    const parsed = new URL(String(url || '').trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return '';
+    }
+    return `${parsed.origin}/*`;
+  } catch {
+    return '';
+  }
+}
+
+async function ensureVpsOriginPermission(vpsUrl) {
+  const originPattern = getOriginPermissionPatternFromUrl(vpsUrl);
+  if (!originPattern) {
+    throw new Error('Invalid VPS URL. Enter a valid http or https VPS address in the Side Panel.');
+  }
+
+  if (!chrome.permissions?.contains || !chrome.permissions?.request) {
+    return originPattern;
+  }
+
+  const alreadyGranted = await chrome.permissions.contains({ origins: [originPattern] });
+  if (alreadyGranted) {
+    return originPattern;
+  }
+
+  let granted = false;
+  try {
+    granted = await chrome.permissions.request({ origins: [originPattern] });
+  } catch (err) {
+    throw new Error(`VPS origin permission was not granted for ${originPattern}. Approve the VPS panel origin in the extension prompt, then retry.`);
+  }
+
+  if (!granted) {
+    throw new Error(`VPS origin permission was not granted for ${originPattern}. Approve the VPS panel origin in the extension prompt, then retry.`);
+  }
+
+  return originPattern;
 }
 
 async function setMailProviderState(mailProvider) {
@@ -552,7 +636,7 @@ async function setTmailorApiStatus(nextStatus) {
 
 async function setPasswordState(password) {
   await setState({ password });
-  broadcastDataUpdate({ password });
+  broadcastTrustedStateUpdated();
 }
 
 async function resetState(options = {}) {
@@ -1296,10 +1380,19 @@ function getFriendlyWarnErrorMessage(message, level = 'info') {
   return text;
 }
 
+function redactLogMessage(message) {
+  return String(message || '')
+    .replace(/https?:\/\/auth\.openai\.com\/api\/oauth\/authorize[^\s"'<>)]*/gi, '[redacted oauth url]')
+    .replace(/https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?\/[^\s"'<>)]*/gi, '[redacted localhost callback]')
+    .replace(/\b(tmailorAccessToken|access[_-]?token|token)(["']?\s*[:=]\s*["']?)[^"',\s}]+/gi, '$1$2[redacted]')
+    .replace(/\b(Password filled):\s*\S+/gi, '$1');
+}
+
 async function addLog(message, level = 'info') {
   const state = await getState();
+  const safeMessage = redactLogMessage(getFriendlyWarnErrorMessage(message, level));
   const entry = {
-    message: getFriendlyWarnErrorMessage(message, level),
+    message: safeMessage,
     level,
     timestamp: Date.now(),
   };
@@ -1506,7 +1599,7 @@ function attachContentFlowControlSequence(message = {}) {
 // ============================================================
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log(LOG_PREFIX, `Received: ${message.type} from ${message.source || 'sidepanel'}`, message);
+  console.log(LOG_PREFIX, `Received: ${message?.type || 'unknown'} from ${message?.source || 'unknown'}`);
 
   handleMessage(message, sender).then(response => {
     sendResponse(response);
@@ -1632,6 +1725,9 @@ async function handleMessage(message, sender) {
     }
 
     case 'GET_STATE': {
+      if (!isTrustedSidePanelRequest(message, sender)) {
+        return { error: 'Unauthorized state access.' };
+      }
       const state = await getState();
       const logHistoryState = getNormalizedLogHistory(state);
       if (
@@ -1644,6 +1740,11 @@ async function handleMessage(message, sender) {
         ...state,
         ...logHistoryState,
       };
+    }
+
+    case 'GET_RUNTIME_STATE': {
+      const state = await getState();
+      return sanitizeRuntimeState(state);
     }
 
     case 'RESET': {
@@ -1882,7 +1983,7 @@ async function handleStepData(step, payload) {
     case 1:
       if (payload.oauthUrl) {
         await setState({ oauthUrl: payload.oauthUrl });
-        broadcastDataUpdate({ oauthUrl: payload.oauthUrl });
+        broadcastTrustedStateUpdated();
       }
       break;
     case 3:
@@ -1895,7 +1996,7 @@ async function handleStepData(step, payload) {
     case 8:
       if (payload.localhostUrl) {
         await setState({ localhostUrl: payload.localhostUrl });
-        broadcastDataUpdate({ localhostUrl: payload.localhostUrl });
+        broadcastTrustedStateUpdated();
       }
       break;
     case 9:
@@ -3332,6 +3433,7 @@ async function executeStep1(state) {
   if (!state.vpsUrl) {
     throw new Error('No VPS URL configured. Enter VPS address in Side Panel first.');
   }
+  await ensureVpsOriginPermission(state.vpsUrl);
   await addLog(`Step 1: Opening VPS panel...`);
   await reuseOrCreateTab('vps-panel', state.vpsUrl, {
     inject: ['shared/flow-recovery.js', 'content/utils.js', 'content/vps-panel.js'],
@@ -5024,6 +5126,7 @@ async function fetchFreshOauthUrlFromVps(state, options = {}) {
     throw new Error('No VPS URL configured. Enter VPS address in Side Panel first.');
   }
 
+  await ensureVpsOriginPermission(state.vpsUrl);
   await addLog(`Step ${logStep}: ${reason}`, 'info');
   await reuseOrCreateTab('vps-panel', state.vpsUrl, {
     inject: ['shared/flow-recovery.js', 'content/utils.js', 'content/vps-panel.js'],
@@ -5042,7 +5145,7 @@ async function fetchFreshOauthUrlFromVps(state, options = {}) {
   }
 
   await setState({ oauthUrl });
-  broadcastDataUpdate({ oauthUrl });
+  broadcastTrustedStateUpdated();
 
   const latestState = await getState();
   return {
@@ -5177,7 +5280,7 @@ async function waitForStep6CompletionSignalOrRecoveredAuthState() {
             'warn'
           );
           await setState({ localhostUrl: tab.url });
-          broadcastDataUpdate({ localhostUrl: tab.url });
+          broadcastTrustedStateUpdated();
           await setStepStatus(6, 'completed');
           notifyStepComplete(6, {
             recoveredAfterNavigation: true,
@@ -5374,7 +5477,7 @@ async function replaySteps6ThroughTargetStepWithCurrentAccount(targetStep, logMe
   targetStep = Math.max(6, Number.parseInt(String(targetStep ?? '').trim(), 10) || 6);
   await addLog(logMessage, 'warn');
   await setState({ localhostUrl: null });
-  broadcastDataUpdate({ localhostUrl: null });
+  broadcastTrustedStateUpdated();
 
   await executeStepAndWait(6, 2000);
   for (let replayStep = 7; replayStep <= targetStep; replayStep++) {
@@ -5410,9 +5513,9 @@ async function executeStep8(state) {
     try {
       const tab = await chrome.tabs.get(signupTabIdEarly);
       if (tab.url && (tab.url.startsWith('http://localhost') || tab.url.startsWith('http://127.0.0.1'))) {
-        await addLog(`第 8 步：已提前捕获到 localhost 回调：${tab.url}`, 'ok');
+        await addLog('第 8 步：已提前捕获到 localhost 回调。', 'ok');
         await setState({ localhostUrl: tab.url });
-        broadcastDataUpdate({ localhostUrl: tab.url });
+        broadcastTrustedStateUpdated();
         return;
       }
     } catch {}
@@ -5442,10 +5545,10 @@ async function executeStep8(state) {
       cleanupListeners();
       clearTimeout(timeout);
       setState({ localhostUrl: url }).then(() => {
-        addLog(`第 8 步：已捕获 localhost 回调地址：${url}`, 'ok');
+        addLog('第 8 步：已捕获 localhost 回调地址。', 'ok');
         setStepStatus(8, 'completed');
         notifyStepComplete(8, { localhostUrl: url });
-        broadcastDataUpdate({ localhostUrl: url });
+        broadcastTrustedStateUpdated();
         resolve();
       });
     };
@@ -5457,7 +5560,7 @@ async function executeStep8(state) {
 
     webNavListener = (details) => {
       if (details.frameId === 0 && isLocalhostUrl(details.url)) {
-        console.log(LOG_PREFIX, `Captured localhost redirect: ${details.url}`);
+        console.log(LOG_PREFIX, 'Captured localhost redirect');
         captureLocalhostUrl(details.url);
       }
     };
@@ -5602,6 +5705,7 @@ async function executeStep9(state) {
     throw new Error('VPS URL not set. Please enter VPS URL in the side panel.');
   }
 
+  await ensureVpsOriginPermission(effectiveState.vpsUrl);
   await addLog('Step 9: Opening VPS panel...');
 
   let tabId = await getTabId('vps-panel');

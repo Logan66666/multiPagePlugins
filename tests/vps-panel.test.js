@@ -142,7 +142,7 @@ test('step 1 refreshes and retries when the Codex OAuth card does not appear on 
   assert.equal(context.__state.completed[0].step, 1);
   assert.match(
     context.__state.logs.map((entry) => entry.message).join('\n'),
-    /Refreshing the VPS page and retrying/i
+    /准备刷新 VPS 页面后重试/
   );
 });
 
@@ -181,7 +181,7 @@ test('step 1 opens the configured VPS oauth page instead of reloading when a 502
     return null;
   };
   context.chrome.runtime.sendMessage = (message) => {
-    if (message?.type === 'GET_STATE') {
+    if (message?.type === 'GET_RUNTIME_STATE') {
       return Promise.resolve({ vpsUrl: 'https://panel.example.com/management.html#/oauth' });
     }
     return Promise.resolve({ ok: true });
@@ -283,7 +283,7 @@ test('step 9 retries callback submission when the VPS panel reports a transient 
   assert.equal(state.completed[0].step, 9);
   assert.match(
     state.logs.map((entry) => entry.message).join('\n'),
-    /502.*retry/i
+    /502（502 Bad Gateway），准备重试提交/
   );
 });
 

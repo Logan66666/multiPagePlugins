@@ -96,7 +96,7 @@ async function fetchOAuthUrlFromPanel(options = {}) {
   for (let attempt = 1; attempt <= maxCardLoadAttempts; attempt++) {
     const bodyText = (document.querySelector('body')?.textContent || '').trim();
     if (/502\s+bad\s+gateway/i.test(bodyText)) {
-      const state = await chrome.runtime.sendMessage({ type: 'GET_STATE' }).catch(() => null);
+      const state = await chrome.runtime.sendMessage({ type: 'GET_RUNTIME_STATE' }).catch(() => null);
       const fallbackUrl = String(state?.vpsUrl || '').trim();
       if (fallbackUrl && fallbackUrl !== location.href) {
         log(`${stepLabelZh}：VPS 返回 502，改为重新打开已配置的 OAuth 页面，而不是刷新错误页。`, 'warn');
@@ -155,7 +155,7 @@ async function fetchOAuthUrlFromPanel(options = {}) {
     throw new Error(`Invalid OAuth URL found: "${oauthUrl.slice(0, 50)}". Expected URL starting with http.`);
   }
 
-  log(`${stepLabelZh}：已获取 OAuth URL：${oauthUrl.slice(0, 80)}...`, 'ok');
+  log(`${stepLabelZh}：已获取 OAuth URL。`, 'ok');
   if (completeStep != null) {
     reportComplete(completeStep, { oauthUrl });
   }
@@ -178,13 +178,13 @@ async function step9_vpsVerify(payload) {
   let localhostUrl = payload?.localhostUrl;
   if (!localhostUrl) {
     log('Step 9: localhostUrl not in payload, fetching from state...');
-    const state = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
+    const state = await chrome.runtime.sendMessage({ type: 'GET_RUNTIME_STATE' });
     localhostUrl = state.localhostUrl;
   }
   if (!localhostUrl) {
     throw new Error('No localhost URL found. Complete step 8 first.');
   }
-  log(`Step 9: Got localhostUrl: ${localhostUrl.slice(0, 60)}...`);
+  log('Step 9: Got localhost callback URL');
 
   log('Step 9: Looking for callback URL input...');
 
@@ -203,7 +203,7 @@ async function step9_vpsVerify(payload) {
 
   await humanPause(600, 1500);
   fillInput(urlInput, localhostUrl);
-  log(`Step 9: Filled callback URL: ${localhostUrl.slice(0, 80)}...`);
+  log('Step 9: Filled callback URL');
 
   // Find and click "提交回调 URL" button
   let submitBtn = null;

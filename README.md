@@ -89,9 +89,10 @@
 2. 选择 `Source`
 3. 如果 `Source = 33mail`，先配置对应组的 33mail 域名
 4. 如果 `Source = Duck`，再选择一个 `Mail` 通道用于收验证码
-5. 先手动跑 Step 1 -> Step 4，确认邮箱和验证码链路没问题
-6. 再跑完整 1 -> 9，确认 OAuth 回调能回写
-7. 最后再开启 `Auto`
+5. 首次访问 VPS 面板时，如果浏览器弹出站点权限确认，允许当前 VPS 域名
+6. 先手动跑 Step 1 -> Step 4，确认邮箱和验证码链路没问题
+7. 再跑完整 1 -> 9，确认 OAuth 回调能回写
+8. 最后再开启 `Auto`
 
 ## Side Panel 配置说明
 
@@ -585,14 +586,24 @@ data/                            姓名、域名等静态数据
 
 ## 安全与数据说明
 
-- 运行态主要保存在 `chrome.storage.session`
+- 运行态主要保存在 `chrome.storage.session`，只有 Side Panel 会读取完整状态
 - 顶部配置会做持久化保存
 - 不会硬编码你的 VPS、邮箱或密码
-- 当前 run 的邮箱、密码、OAuth、callback 和日志会保存在会话态里，便于恢复和排查
+- 内容脚本只能读取净化后的运行状态，不会拿到密码、OAuth URL、localhost callback、TMailor token 或账号历史
+- Console 日志、Toast、复制出来的日志历史都会先做脱敏处理
+- 普通状态广播不会再携带密码、OAuth URL、localhost callback 或 TMailor token
+- 扩展不再请求 `<all_urls>`；固定权限只覆盖 OpenAI、邮箱和 TMailor 等已知站点，VPS 面板域名会在使用时按需授权
+- 当前 run 的敏感值仍会保存在可信会话态里，便于 Side Panel 展示、复制和流程恢复
 
 ## 测试
 
-项目已经包含较多 Node 级测试，常见可直接执行：
+完整测试命令：
+
+```powershell
+node --test .\tests\*.test.js
+```
+
+常见定向测试：
 
 ```powershell
 node .\tests\tmailor-mail.test.js
@@ -600,4 +611,7 @@ node .\tests\tmailor-api.test.js
 node .\tests\tmailor-domains.test.js
 node .\tests\signup-page-verification.test.js
 node .\tests\vps-panel.test.js
+node .\tests\runtime-state-security.test.js
+node .\tests\log-redaction.test.js
+node .\tests\data-update-redaction.test.js
 ```
