@@ -276,7 +276,7 @@ test('pollTmailorVerificationCode keeps retrying cached candidates when read tim
         msg: 'ok',
         data: {
           subject: 'Your ChatGPT code is ******',
-          body: 'Use verification code 661245 to continue.',
+          body: 'Use verification code 661245 to continue login.',
         },
       });
     }
@@ -394,6 +394,27 @@ test('pollTmailorVerificationCode skips excluded verification codes and waits fo
         },
       });
     }
+    if (payload.action === 'read') {
+      if (payload.email_code === 'mail-login-a') {
+        return createJsonResponse({
+          msg: 'ok',
+          data: {
+            subject: 'Your ChatGPT code is 112233',
+            body: 'Your ChatGPT code is 112233. Use this code to continue login.',
+          },
+        });
+      }
+
+      if (payload.email_code === 'mail-login-b') {
+        return createJsonResponse({
+          msg: 'ok',
+          data: {
+            subject: 'Your ChatGPT code is 665544',
+            body: 'Your ChatGPT code is 665544. Use this code to continue login.',
+          },
+        });
+      }
+    }
     throw new Error(`Unexpected action: ${payload.action}`);
   };
 
@@ -410,6 +431,84 @@ test('pollTmailorVerificationCode skips excluded verification codes and waits fo
 
   assert.equal(result.code, '665544');
   assert.equal(result.mailId, 'mail-login-b');
+});
+
+test('pollTmailorVerificationCode skips a signup-style step 7 detail mail and waits for a login mail', async () => {
+  const now = new Date('2026-04-10T10:00:00.000Z').getTime();
+  let attempts = 0;
+
+  const fetchImpl = async (_url, options = {}) => {
+    const payload = JSON.parse(options.body);
+    if (payload.action === 'listinbox') {
+      attempts += 1;
+      if (attempts === 1) {
+        return createJsonResponse({
+          msg: 'ok',
+          code: 'list-login-create',
+          data: {
+            item1: {
+              id: 'mail-login-create',
+              email_id: 'detail-login-create',
+              subject: 'Your OpenAI code is ******',
+              from: 'OpenAI',
+              created_at: new Date(now).toISOString(),
+            },
+          },
+        });
+      }
+
+      return createJsonResponse({
+        msg: 'ok',
+        code: 'list-login-real',
+        data: {
+          item2: {
+            id: 'mail-login-real',
+            email_id: 'detail-login-real',
+            subject: 'Your OpenAI code is ******',
+            from: 'OpenAI',
+            created_at: new Date(now + 1000).toISOString(),
+          },
+        },
+      });
+    }
+
+    if (payload.action === 'read') {
+      if (payload.email_code === 'mail-login-create') {
+        return createJsonResponse({
+          msg: 'ok',
+          data: {
+            subject: 'Your OpenAI code is ******',
+            body: 'Your OpenAI code is 112233. Use this code to continue creating your account.',
+          },
+        });
+      }
+
+      if (payload.email_code === 'mail-login-real') {
+        return createJsonResponse({
+          msg: 'ok',
+          data: {
+            subject: 'Your OpenAI code is ******',
+            body: 'Your OpenAI code is 665544. Use this code to continue login.',
+          },
+        });
+      }
+    }
+
+    throw new Error(`Unexpected action: ${payload.action}`);
+  };
+
+  const result = await pollTmailorVerificationCode({
+    fetchImpl,
+    accessToken: 'token-login-intent',
+    step: 7,
+    filterAfterTimestamp: now - 60_000,
+    maxAttempts: 2,
+    intervalMs: 0,
+    now,
+  });
+
+  assert.equal(result.code, '665544');
+  assert.equal(result.mailId, 'mail-login-real');
 });
 
 test('pollTmailorVerificationCode retries transient listinbox failures before succeeding', async () => {

@@ -14,6 +14,7 @@ function createContext() {
     logs: [],
     historyBackCalls: 0,
   };
+  const sessionStorageState = new Map();
 
   const context = {
     console: {
@@ -25,6 +26,17 @@ function createContext() {
     history: {
       back() {
         state.historyBackCalls += 1;
+      },
+    },
+    sessionStorage: {
+      getItem(key) {
+        return sessionStorageState.has(key) ? sessionStorageState.get(key) : null;
+      },
+      setItem(key, value) {
+        sessionStorageState.set(key, String(value));
+      },
+      removeItem(key) {
+        sessionStorageState.delete(key);
       },
     },
     chrome: {
@@ -56,6 +68,9 @@ function createContext() {
     MailMatching: {
       getStepMailMatchProfile() {
         return null;
+      },
+      isExpectedVerificationMailDetail() {
+        return true;
       },
       matchesSubjectPatterns() {
         return false;
@@ -548,7 +563,7 @@ test('tmailor can return the code directly when the mailbox is already on the em
   const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
   assert.ok(hooks?.readCodeFromCurrentDetailPage, 'expected tmailor test hooks to expose readCodeFromCurrentDetailPage');
 
-  const result = hooks.readCodeFromCurrentDetailPage(4, {
+  const result = await hooks.readCodeFromCurrentDetailPage(4, {
     senderFilters: ['openai', 'noreply'],
     subjectFilters: ['验证', 'code'],
     targetEmail: 'abc123@mikrotikvn.com',
@@ -576,7 +591,7 @@ test('tmailor can return the platform OpenAI code directly when the mailbox is a
   const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
   assert.ok(hooks?.readCodeFromCurrentDetailPage, 'expected tmailor test hooks to expose readCodeFromCurrentDetailPage');
 
-  const result = hooks.readCodeFromCurrentDetailPage(4, {
+  const result = await hooks.readCodeFromCurrentDetailPage(4, {
     senderFilters: ['openai', 'noreply'],
     subjectFilters: ['验证', 'code'],
     targetEmail: 'abc123@mikrotikvn.com',
@@ -690,6 +705,7 @@ test('tmailor keeps the current detail page open after step 4 reads the code', a
 
 test('tmailor step 7 reads the code from the mail detail page without navigating home', async () => {
   const context = createContext();
+  context.MailMatching = require('../shared/mail-matching.js');
   const state = context.__state;
   context.location.href = 'https://tmailor.com/inbox?emailid=detail-456';
   state.bodyText = 'Your ChatGPT code is ******';
@@ -704,6 +720,9 @@ test('tmailor step 7 reads the code from the mail detail page without navigating
   context.document.querySelector = (selector) => {
     if (selector === 'h1') {
       return { textContent: 'Your ChatGPT code is 665544' };
+    }
+    if (selector === '#bodyCell') {
+      return { textContent: 'Your ChatGPT code is 665544. Use this code to continue login.' };
     }
     return null;
   };
@@ -741,8 +760,121 @@ test('tmailor step 7 reads the code from the mail detail page without navigating
   assert.equal(state.historyBackCalls, 0);
 });
 
+test('tmailor step 7 accepts the detail mail once log-in wording appears even if signup wording was sampled first', async () => {
+  const context = createContext();
+  context.MailMatching = require('../shared/mail-matching.js');
+  context.location.href = 'https://tmailor.com/inbox?emailid=detail-step7-login-after-stale-signup';
+
+  let detailPhase = 'signup';
+  context.document.querySelector = (selector) => {
+    if (selector === 'h1') {
+      return { textContent: 'Your ChatGPT code is 872149' };
+    }
+    if (selector === '#bodyCell') {
+      if (detailPhase === 'signup') {
+        return { textContent: 'Your ChatGPT code is 872149. Use this code to continue creating your account.' };
+      }
+      return { textContent: 'ChatGPT Log-in Code. We noticed a suspicious log-in on your account. Your ChatGPT code is 872149.' };
+    }
+    if (selector === 'body') {
+      if (detailPhase === 'signup') {
+        return { textContent: 'Your ChatGPT code is 872149. Use this code to continue creating your account.' };
+      }
+      return { textContent: 'ChatGPT Log-in Code. We noticed a suspicious log-in on your account. Your ChatGPT code is 872149.' };
+    }
+    return null;
+  };
+  context.document.querySelectorAll = () => [];
+  context.sleep = async () => {
+    detailPhase = 'login';
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.readCodeFromCurrentDetailPage, 'expected tmailor test hooks to expose readCodeFromCurrentDetailPage');
+
+  const result = await hooks.readCodeFromCurrentDetailPage(7, {
+    subjectFilters: ['验证', 'code', 'login'],
+    senderFilters: ['openai', 'noreply'],
+    targetEmail: 'abc123@mikfarm.com',
+  });
+
+  assert.equal(result?.code, '872149');
+  assert.equal(result?.rejectedReason, undefined);
+  assert.match(result?.detailText || '', /log[\s-]*in/i);
+});
+
+test('tmailor step 7 treats explicit log-in wording as a login mail even if stale signup wording is still present', async () => {
+  const context = createContext();
+  context.MailMatching = require('../shared/mail-matching.js');
+  context.location.href = 'https://tmailor.com/inbox?emailid=detail-step7-login-overrides-signup';
+
+  context.document.querySelector = (selector) => {
+    if (selector === 'h1') {
+      return { textContent: 'Your ChatGPT code is 872149' };
+    }
+    if (selector === '#bodyCell' || selector === 'body') {
+      return {
+        textContent: 'ChatGPT Log-in Code. We noticed a suspicious log-in on your account. Your ChatGPT code is 872149. Ignore the stale copy that says continue creating your account.',
+      };
+    }
+    return null;
+  };
+  context.document.querySelectorAll = () => [];
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.readCodeFromCurrentDetailPage, 'expected tmailor test hooks to expose readCodeFromCurrentDetailPage');
+
+  const result = await hooks.readCodeFromCurrentDetailPage(7, {
+    subjectFilters: ['验证', 'code', 'login'],
+    senderFilters: ['openai', 'noreply'],
+    targetEmail: 'abc123@mikfarm.com',
+  });
+
+  assert.equal(result?.code, '872149');
+  assert.equal(result?.rejectedReason, undefined);
+  assert.match(result?.detailText || '', /log[\s-]*in/i);
+});
+
+test('tmailor step 7 ignores signup-like page chrome when only the detail heading is available', async () => {
+  const context = createContext();
+  context.MailMatching = require('../shared/mail-matching.js');
+  context.location.href = 'https://tmailor.com/inbox?emailid=detail-step7-page-chrome-noise';
+
+  context.document.querySelector = (selector) => {
+    if (selector === 'h1') {
+      return { textContent: 'Your ChatGPT code is 638160' };
+    }
+    if (selector === 'body') {
+      return {
+        textContent: 'Your ChatGPT code is 638160 Tmailor.com Features Reuse temp mail address Create your account with temporary mail helpers and verification emails.',
+      };
+    }
+    return null;
+  };
+  context.document.querySelectorAll = () => [];
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.readCodeFromCurrentDetailPage, 'expected tmailor test hooks to expose readCodeFromCurrentDetailPage');
+
+  const result = await hooks.readCodeFromCurrentDetailPage(7, {
+    subjectFilters: ['验证', 'code', 'login'],
+    senderFilters: ['openai', 'noreply'],
+    targetEmail: 'abc123@mikfarm.com',
+  });
+
+  assert.equal(result?.code, '638160');
+  assert.equal(result?.rejectedReason, undefined);
+  assert.equal(result?.detailText || '', 'Your ChatGPT code is 638160');
+});
+
 test('tmailor step 7 keeps waiting for the detail code after the detail url appears', async () => {
   const context = createContext();
+  context.MailMatching = require('../shared/mail-matching.js');
   const sleepCalls = [];
   let detailOpened = false;
 
@@ -750,6 +882,9 @@ test('tmailor step 7 keeps waiting for the detail code after the detail url appe
   context.document.querySelector = (selector) => {
     if (selector === 'h1' && detailOpened) {
       return { textContent: 'Your ChatGPT code is 443322' };
+    }
+    if (selector === '#bodyCell' && detailOpened) {
+      return { textContent: 'Your ChatGPT code is 443322. Use this code to continue login.' };
     }
     return null;
   };
@@ -788,6 +923,81 @@ test('tmailor step 7 keeps waiting for the detail code after the detail url appe
   assert.equal(code, '443322');
   assert.equal(context.location.href, 'https://tmailor.com/inbox?emailid=detail-delayed-home');
   assert.equal(sleepCalls.reduce((sum, value) => sum + value, 0), 1000);
+});
+
+test('tmailor step 7 returns to the inbox and waits for another mail when the detail body looks signup-style', async () => {
+  const context = createContext();
+  context.MailMatching = require('../shared/mail-matching.js');
+  const state = context.__state;
+  context.location.href = 'https://tmailor.com/inbox?emailid=detail-step7-signup-wording';
+  const inboxButton = {
+    tagName: 'BUTTON',
+    textContent: 'Inbox',
+    getBoundingClientRect() {
+      return { width: 80, height: 24 };
+    },
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === 'h1') {
+      return { textContent: 'Your OpenAI code is 112233' };
+    }
+    if (selector === '#bodyCell') {
+      return { textContent: 'Your OpenAI code is 112233. Use this code to continue creating your account.' };
+    }
+    if (selector === 'body') {
+      return { textContent: 'Your OpenAI code is 112233. Use this code to continue creating your account.' };
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [inboxButton];
+    }
+    return [];
+  };
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+    if (target === inboxButton) {
+      context.location.href = 'https://tmailor.com/';
+    }
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.readCodeFromMailRow, 'expected tmailor test hooks to expose readCodeFromMailRow');
+
+  const row = {
+    combinedText: 'Your OpenAI code is ******',
+    element: {
+      getAttribute() {
+        return null;
+      },
+      querySelector() {
+        return null;
+      },
+      getBoundingClientRect() {
+        return { width: 120, height: 24 };
+      },
+      textContent: 'Your OpenAI code is ******',
+    },
+  };
+
+  const code = await hooks.readCodeFromMailRow(row, 7);
+
+  assert.equal(code, null);
+  assert.equal(context.location.href, 'https://tmailor.com/');
+  assert.equal(state.lastClicked, inboxButton);
+  assert.equal(
+    context.__state.logs.some((entry) => /signup verification email/i.test(entry.message)),
+    true
+  );
+  assert.equal(
+    context.__state.logs.some((entry) => /detail rejection details: reason=signup_intent; code=112233; signupIntent=yes; loginIntent=no; .*snippet=".*creating your account/i.test(entry.message)),
+    true
+  );
 });
 
 test('tmailor handlePollEmail can resume on the mail detail page after reinjection without forcing a home navigation', async () => {
@@ -1078,6 +1288,340 @@ test('tmailor step 7 opens an already visible Chinese OpenAI login mail instead 
   assert.equal(result.code, '223344');
   assert.equal(context.__state.clicked, 1);
   assert.equal(context.location.href, 'https://tmailor.com/inbox?emailid=mail-row-openai-step7');
+});
+
+test('tmailor step 7 rejects a signup-style detail mail, returns to inbox, and keeps polling for a login mail', async () => {
+  const context = createContext();
+  context.MailMatching = require('../shared/mail-matching.js');
+
+  const signupRow = {
+    tagName: 'TR',
+    textContent: 'noreply@tm.openai.com\n你的 OpenAI 代码为 ******\n刚刚',
+    getAttribute(name) {
+      if (name === 'data-id') return 'mail-row-openai-signup-step7';
+      return null;
+    },
+    querySelector() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 260, height: 48 };
+    },
+  };
+  const loginRow = {
+    tagName: 'TR',
+    textContent: 'noreply@tm.openai.com\n你的 OpenAI 代码为 ******\n刚刚',
+    getAttribute(name) {
+      if (name === 'data-id') return 'mail-row-openai-login-step7';
+      return null;
+    },
+    querySelector() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 260, height: 48 };
+    },
+  };
+
+  let openedRowId = '';
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [
+        {
+          textContent: 'Inbox',
+          getBoundingClientRect() {
+            return { width: 80, height: 24 };
+          },
+        },
+        {
+          textContent: 'Refresh',
+          getBoundingClientRect() {
+            return { width: 80, height: 24 };
+          },
+        },
+      ];
+    }
+    if (selector === 'tr') {
+      return [signupRow, loginRow];
+    }
+    return [];
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === 'h1') {
+      if (openedRowId === 'mail-row-openai-signup-step7') {
+        return { textContent: '你的 OpenAI 代码为 112233' };
+      }
+      if (openedRowId === 'mail-row-openai-login-step7') {
+        return { textContent: '你的 OpenAI 代码为 223344' };
+      }
+      return null;
+    }
+    if (selector === '#bodyCell') {
+      if (openedRowId === 'mail-row-openai-signup-step7') {
+        return { textContent: '你的 OpenAI 代码为 112233。请输入此验证码以继续创建 ChatGPT 帐户。' };
+      }
+      if (openedRowId === 'mail-row-openai-login-step7') {
+        return { textContent: '你的 OpenAI 代码为 223344。请输入此验证码以继续登录。' };
+      }
+      return null;
+    }
+    return null;
+  };
+  context.simulateClick = (target) => {
+    context.__state.clicked += 1;
+    context.__state.lastClicked = target;
+    if (target === signupRow) {
+      openedRowId = 'mail-row-openai-signup-step7';
+      context.location.href = 'https://tmailor.com/inbox?emailid=mail-row-openai-signup-step7';
+    }
+    if (target?.textContent === 'Inbox') {
+      openedRowId = '';
+      context.location.href = 'https://tmailor.com/';
+    }
+    if (target === loginRow) {
+      openedRowId = 'mail-row-openai-login-step7';
+      context.location.href = 'https://tmailor.com/inbox?emailid=mail-row-openai-login-step7';
+    }
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.handlePollEmail, 'expected tmailor test hooks to expose handlePollEmail');
+
+  const result = await hooks.handlePollEmail(7, {
+    subjectFilters: ['验证', 'code', 'login'],
+    senderFilters: ['openai', 'noreply'],
+    targetEmail: 'abc123@mikfarm.com',
+    maxAttempts: 2,
+    intervalMs: 0,
+    filterAfterTimestamp: 0,
+    excludeCodes: [],
+  });
+
+  assert.equal(result.code, '223344');
+  assert.equal(context.__state.clicked, 3);
+  assert.equal(context.location.href, 'https://tmailor.com/inbox?emailid=mail-row-openai-login-step7');
+});
+
+test('tmailor step 7 skips a previously rejected signup detail after reinjection in the same mailbox tab', async () => {
+  const context = createContext();
+  context.MailMatching = require('../shared/mail-matching.js');
+
+  const signupRow = {
+    tagName: 'TR',
+    textContent: 'noreply@tm.openai.com\n你的 OpenAI 代码为 ******\n刚刚',
+    getAttribute(name) {
+      if (name === 'data-id') return 'mail-row-openai-signup-step7-reinject';
+      return null;
+    },
+    querySelector() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 260, height: 48 };
+    },
+  };
+  const loginRow = {
+    tagName: 'TR',
+    textContent: 'noreply@tm.openai.com\n你的 OpenAI 代码为 ******\n刚刚',
+    getAttribute(name) {
+      if (name === 'data-id') return 'mail-row-openai-login-step7-reinject';
+      return null;
+    },
+    querySelector() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 260, height: 48 };
+    },
+  };
+
+  let openedRowId = '';
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [{
+        textContent: 'Refresh',
+        getBoundingClientRect() {
+          return { width: 80, height: 24 };
+        },
+      }];
+    }
+    if (selector === 'tr') {
+      return [signupRow, loginRow];
+    }
+    return [];
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === 'h1') {
+      if (openedRowId === 'mail-row-openai-signup-step7-reinject') {
+        return { textContent: '你的 OpenAI 代码为 112233' };
+      }
+      if (openedRowId === 'mail-row-openai-login-step7-reinject') {
+        return { textContent: '你的 OpenAI 代码为 223344' };
+      }
+      return null;
+    }
+    if (selector === '#bodyCell') {
+      if (openedRowId === 'mail-row-openai-signup-step7-reinject') {
+        return { textContent: '你的 OpenAI 代码为 112233。请输入此验证码以继续创建 ChatGPT 帐户。' };
+      }
+      if (openedRowId === 'mail-row-openai-login-step7-reinject') {
+        return { textContent: '你的 OpenAI 代码为 223344。请输入此验证码以继续登录。' };
+      }
+      return null;
+    }
+    return null;
+  };
+  context.simulateClick = (target) => {
+    context.__state.clicked += 1;
+    context.__state.lastClicked = target;
+    if (target === signupRow) {
+      openedRowId = 'mail-row-openai-signup-step7-reinject';
+      context.location.href = 'https://tmailor.com/inbox?emailid=mail-row-openai-signup-step7-reinject';
+    }
+    if (target === loginRow) {
+      openedRowId = 'mail-row-openai-login-step7-reinject';
+      context.location.href = 'https://tmailor.com/inbox?emailid=mail-row-openai-login-step7-reinject';
+    }
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  let hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.rememberRejectedVerificationDetail, 'expected tmailor test hooks to expose rememberRejectedVerificationDetail');
+  hooks.rememberRejectedVerificationDetail(7, { targetEmail: 'abc123@mikfarm.com' }, {
+    code: '112233',
+    mailId: 'mail-row-openai-signup-step7-reinject',
+  });
+
+  loadTmailorScript(context);
+  hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+
+  const result = await hooks.handlePollEmail(7, {
+    subjectFilters: ['验证', 'code', 'login'],
+    senderFilters: ['openai', 'noreply'],
+    targetEmail: 'abc123@mikfarm.com',
+    maxAttempts: 1,
+    intervalMs: 0,
+    filterAfterTimestamp: 0,
+    excludeCodes: [],
+  });
+
+  assert.equal(result.code, '223344');
+  assert.equal(context.__state.clicked, 1);
+  assert.equal(context.__state.lastClicked, loginRow);
+  assert.equal(context.location.href, 'https://tmailor.com/inbox?emailid=mail-row-openai-login-step7-reinject');
+});
+
+test('tmailor step 7 skips a previously rejected preview code before reopening the same mail row after reinjection', async () => {
+  const context = createContext();
+  context.MailMatching = require('../shared/mail-matching.js');
+
+  const rejectedPreviewRow = {
+    tagName: 'TR',
+    textContent: 'noreply@tm.openai.com\nYour ChatGPT code is 487341\n11:44',
+    getAttribute(name) {
+      if (name === 'data-id') return 'mail-row-openai-preview-signup-step7';
+      return null;
+    },
+    querySelector() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 260, height: 48 };
+    },
+  };
+  const loginRow = {
+    tagName: 'TR',
+    textContent: 'noreply@tm.openai.com\nYour ChatGPT code is 223344\n11:45',
+    getAttribute(name) {
+      if (name === 'data-id') return 'mail-row-openai-preview-login-step7';
+      return null;
+    },
+    querySelector() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 260, height: 48 };
+    },
+  };
+
+  let openedRowId = '';
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [{
+        textContent: 'Refresh',
+        getBoundingClientRect() {
+          return { width: 80, height: 24 };
+        },
+      }];
+    }
+    if (selector === 'tr') {
+      return [rejectedPreviewRow, loginRow];
+    }
+    return [];
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === 'h1') {
+      if (openedRowId === 'mail-row-openai-preview-signup-step7') {
+        return { textContent: 'Your ChatGPT code is 487341' };
+      }
+      if (openedRowId === 'mail-row-openai-preview-login-step7') {
+        return { textContent: 'Your ChatGPT code is 223344' };
+      }
+      return null;
+    }
+    if (selector === '#bodyCell') {
+      if (openedRowId === 'mail-row-openai-preview-signup-step7') {
+        return { textContent: 'Your ChatGPT code is 487341. Complete your account creation with this code.' };
+      }
+      if (openedRowId === 'mail-row-openai-preview-login-step7') {
+        return { textContent: 'Your ChatGPT code is 223344. Continue login with this code.' };
+      }
+      return null;
+    }
+    return null;
+  };
+  context.simulateClick = (target) => {
+    context.__state.clicked += 1;
+    context.__state.lastClicked = target;
+    if (target === rejectedPreviewRow) {
+      openedRowId = 'mail-row-openai-preview-signup-step7';
+      context.location.href = 'https://tmailor.com/inbox?emailid=mail-row-openai-preview-signup-step7';
+    }
+    if (target === loginRow) {
+      openedRowId = 'mail-row-openai-preview-login-step7';
+      context.location.href = 'https://tmailor.com/inbox?emailid=mail-row-openai-preview-login-step7';
+    }
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  let hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  hooks.rememberRejectedVerificationDetail(7, { targetEmail: 'abc123@mikfarm.com' }, {
+    code: '487341',
+    mailId: 'https://tmailor.com/inbox?emailid=3b55066e-8972-4b3c-aa5d-01eb7deb6619',
+  });
+
+  loadTmailorScript(context);
+  hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.handlePollEmail, 'expected tmailor test hooks to expose handlePollEmail');
+
+  const result = await hooks.handlePollEmail(7, {
+    subjectFilters: ['验证', 'code', 'login'],
+    senderFilters: ['openai', 'noreply'],
+    targetEmail: 'abc123@mikfarm.com',
+    maxAttempts: 1,
+    intervalMs: 0,
+    filterAfterTimestamp: 0,
+    excludeCodes: [],
+  });
+
+  assert.equal(result.code, '223344');
+  assert.equal(context.__state.clicked, 1);
+  assert.equal(context.__state.lastClicked, loginRow);
+  assert.equal(context.location.href, 'https://tmailor.com/inbox?emailid=mail-row-openai-preview-login-step7');
 });
 
 test('tmailor waits for Cloudflare confirm when the verification page appears', async () => {
@@ -3729,6 +4273,172 @@ test('tmailor closes the ad_position_box overlay with the dismiss button selecto
   );
 });
 
+test('tmailor interruption sweep closes the blocking ad before attempting Cloudflare on the mailbox page', async () => {
+  const context = createContext();
+  const state = context.__state;
+  state.interstitialVisible = true;
+  let challengeVisible = true;
+
+  const adBox = {
+    id: 'ad_position_box',
+    getBoundingClientRect() {
+      return { width: 480, height: 320 };
+    },
+  };
+  const dismissClose = {
+    tagName: 'DIV',
+    textContent: 'Close',
+    getBoundingClientRect() {
+      return { width: 80, height: 30 };
+    },
+  };
+  const turnstileContainer = {
+    tagName: 'DIV',
+    className: 'cf-turnstile',
+    getBoundingClientRect() {
+      return { left: 80, top: 140, width: 300, height: 80 };
+    },
+  };
+  const confirmButton = {
+    id: 'btnNewEmailForm',
+    tagName: 'BUTTON',
+    textContent: 'Confirm',
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'aria-disabled') {
+        return 'false';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 80, height: 24 };
+    },
+  };
+
+  context.document.body.innerText = 'Please verify that you are not a robot. Confirm Close';
+  context.document.querySelector = (selector) => {
+    if (selector === '#ad_position_box') {
+      return state.interstitialVisible ? adBox : null;
+    }
+    if (selector === '#dismiss-button-element > div') {
+      return state.interstitialVisible ? dismissClose : null;
+    }
+    if (selector === '#btnNewEmailForm') {
+      return challengeVisible ? confirmButton : null;
+    }
+    if (selector === '.cf-turnstile' || selector.includes('.cf-turnstile') || selector.includes('.html-captcha')) {
+      return challengeVisible ? turnstileContainer : null;
+    }
+    if (selector.includes('input[name="cf-turnstile-response"]')) {
+      return challengeVisible ? { value: '' } : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      const controls = [];
+      if (state.interstitialVisible) controls.push(dismissClose);
+      if (challengeVisible) controls.push(confirmButton);
+      return controls;
+    }
+    return [];
+  };
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+    if (target === dismissClose) {
+      state.interstitialVisible = false;
+    }
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.runMailboxInterruptionSweep, 'expected tmailor test hooks to expose runMailboxInterruptionSweep');
+
+  const handled = await hooks.runMailboxInterruptionSweep({ reason: 'mailbox blockers', includeCloudflare: true });
+
+  assert.equal(handled, true);
+  assert.equal(state.lastClicked, dismissClose);
+  assert.equal((state.runtimeMessages || []).length, 0);
+});
+
+test('tmailor interruption sweep does not attempt Cloudflare while a blocking ad overlay is still visible', async () => {
+  const context = createContext();
+  const state = context.__state;
+  const adBox = {
+    id: 'ad_position_box',
+    getBoundingClientRect() {
+      return { width: 480, height: 320 };
+    },
+  };
+  const turnstileContainer = {
+    tagName: 'DIV',
+    className: 'cf-turnstile',
+    getBoundingClientRect() {
+      return { left: 80, top: 140, width: 300, height: 80 };
+    },
+  };
+  const confirmButton = {
+    id: 'btnNewEmailForm',
+    tagName: 'BUTTON',
+    textContent: 'Confirm',
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'aria-disabled') {
+        return 'false';
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 80, height: 24 };
+    },
+  };
+
+  context.document.body.innerText = 'Please verify that you are not a robot. Confirm';
+  context.document.querySelector = (selector) => {
+    if (selector === '#ad_position_box') {
+      return adBox;
+    }
+    if (selector === '#dismiss-button-element > div' || selector === '#dismiss-button-element') {
+      return null;
+    }
+    if (selector === '#btnNewEmailForm') {
+      return confirmButton;
+    }
+    if (selector === '.cf-turnstile' || selector.includes('.cf-turnstile') || selector.includes('.html-captcha')) {
+      return turnstileContainer;
+    }
+    if (selector.includes('input[name="cf-turnstile-response"]')) {
+      return { value: '' };
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [confirmButton];
+    }
+    return [];
+  };
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.runMailboxInterruptionSweep, 'expected tmailor test hooks to expose runMailboxInterruptionSweep');
+
+  await assert.rejects(
+    hooks.runMailboxInterruptionSweep({ reason: 'mailbox blockers', includeCloudflare: true }),
+    /Blocking overlay detected on TMailor\. Temporary failure, please take over manually\./i
+  );
+
+  assert.equal(state.clicked, 0);
+  assert.equal((state.runtimeMessages || []).length, 0);
+});
+
 test('tmailor waitForMailboxControls auto-attempts Cloudflare before allowing manual takeover', async () => {
   const context = createContext();
   const state = context.__state;
@@ -5116,6 +5826,159 @@ test('tmailor asks background to reopen the mailbox when inbox refresh sees a di
     state.logs.some((entry) => /当前页面邮箱 .* 与面板邮箱 .* 不一致，刷新前先请求后台重开邮箱页/i.test(entry.message)),
     'expected a mismatch handoff log'
   );
+});
+
+test('tmailor polling asks background to reload the mailbox when controls stay unavailable for too long', async () => {
+  const context = createContext();
+  const state = context.__state;
+  let now = 0;
+
+  context.Date = class extends Date {
+    static now() {
+      return now;
+    }
+  };
+
+  const currentEmailInput = {
+    tagName: 'INPUT',
+    value: '',
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'aria-label') return 'Your Temp Mail Address';
+      if (name === 'value') return this.value;
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 180, top: 420, width: 467, height: 64 };
+    },
+  };
+
+  context.document.body = {
+    get innerText() {
+      return 'Loading mailbox...';
+    },
+    set innerText(value) {
+      state.bodyText = value;
+    },
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === 'input[name="currentEmailAddress"]') return currentEmailInput;
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'input, textarea') {
+      return [currentEmailInput];
+    }
+    return [];
+  };
+  context.sleep = async (ms = 0) => {
+    now += ms;
+    state.sleepCalls += 1;
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.handlePollEmail, 'expected tmailor to expose handlePollEmail');
+
+  const result = await hooks.handlePollEmail(4, {
+    targetEmail: 'stuckbox@tiksofi.uk',
+    maxAttempts: 2,
+    intervalMs: 0,
+  });
+
+  assert.equal(result?.recovery, 'reload_mailbox');
+  assert.equal(result?.reason, 'mailbox_controls_timeout');
+  assert.match(String(result?.error || ''), /did not finish loading mailbox controls/i);
+  assert.ok(
+    state.logs.some((entry) => /邮箱页长时间未恢复可用状态，准备请求后台重开邮箱页后重试/i.test(entry.message)),
+    'expected a timeout handoff log'
+  );
+});
+
+test('tmailor nudges the mailbox home container after refresh when the page is idle and no cloudflare is visible yet', async () => {
+  const context = createContext();
+  const state = context.__state;
+
+  const homeEmail = {
+    id: 'homeEmail',
+    tagName: 'DIV',
+    textContent: 'Your Temp Mail Address',
+    parentElement: null,
+    getBoundingClientRect() {
+      return { left: 120, top: 180, width: 760, height: 330 };
+    },
+  };
+  const emailDetail = {
+    id: 'EmailDetail',
+    tagName: 'DIV',
+    textContent: 'Your Temp Mail Address ngzwcnvc@tiksofi.uk',
+    parentElement: homeEmail,
+    getBoundingClientRect() {
+      return { left: 180, top: 420, width: 467, height: 64 };
+    },
+  };
+  const currentEmailInput = {
+    tagName: 'INPUT',
+    value: 'ngzwcnvc@tiksofi.uk',
+    disabled: false,
+    parentElement: emailDetail,
+    getAttribute(name) {
+      if (name === 'aria-label') return 'Your Temp Mail Address';
+      if (name === 'value') return this.value;
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 180, top: 420, width: 467, height: 64 };
+    },
+  };
+  const newEmailButton = {
+    id: 'btnNewEmail',
+    tagName: 'BUTTON',
+    textContent: 'New Email',
+    getBoundingClientRect() {
+      return { left: 180, top: 650, width: 160, height: 48 };
+    },
+  };
+
+  context.document.body = {
+    get innerText() {
+      return 'Your Temp Mail Address Copy this address and use it for OTPs, sign-ups, and verification emails. New Email Reuse Email Access Details';
+    },
+    set innerText(value) {
+      state.bodyText = value;
+    },
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === 'input[name="currentEmailAddress"]') return currentEmailInput;
+    if (selector === '#btnNewEmail') return newEmailButton;
+    if (selector === '#EmailDetail') return emailDetail;
+    if (selector === '#homeEmail') return homeEmail;
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [newEmailButton];
+    }
+    if (selector === 'input, textarea') {
+      return [currentEmailInput];
+    }
+    return [];
+  };
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+  };
+  context.sleep = async () => {};
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.nudgeMailboxIdleEntryAfterRefresh, 'expected tmailor to expose nudgeMailboxIdleEntryAfterRefresh');
+
+  const nudged = await hooks.nudgeMailboxIdleEntryAfterRefresh();
+
+  assert.equal(nudged, true);
+  assert.equal(state.clicked, 1);
+  assert.equal(state.lastClicked, emailDetail);
 });
 
 test('tmailor mailbox generation retries 100 times and suggests switching to com+whitelist mode when every domain is unsupported', async () => {

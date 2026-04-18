@@ -83,6 +83,13 @@
     return true;
   };
 
+  const isExpectedVerificationMailDetail = MailMatching?.isExpectedVerificationMailDetail || function() {
+    return true;
+  };
+  const hasSignupVerificationMailDetail = MailMatching?.hasSignupVerificationMailDetail || function() {
+    return false;
+  };
+
   const normalizeText = MailMatching?.normalizeText || function(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
   };
@@ -343,6 +350,10 @@
     if (!data) return [];
     if (Array.isArray(data)) return data;
     return Object.values(data);
+  }
+
+  function shouldInspectDetailBeforeAcceptingCode(step) {
+    return Number.parseInt(String(step ?? 0), 10) === 7;
   }
 
   function buildMessageCacheKey(message) {
@@ -606,8 +617,9 @@
         for (const candidate of candidateMessages) {
           const candidateKey = buildMessageCacheKey(candidate);
           let code = extractVerificationCode(candidate.subject + ' ' + candidate.combinedText);
+          let detailText = candidate.subject + ' ' + candidate.combinedText;
 
-          if (!code) {
+          if (!code || shouldInspectDetailBeforeAcceptingCode(config.step)) {
             let detail;
             try {
               detail = await retryTmailorApiOperation({
@@ -633,6 +645,9 @@
               readFailed = true;
               break;
             }
+            detailText = normalizeText(
+              String(detail.subject || '') + ' ' + String(detail.text || '') + ' ' + String(detail.body || '')
+            );
             code = extractVerificationCode(
               String(detail.subject || '') + ' ' + String(detail.text || '') + ' ' + String(detail.body || '')
             );
@@ -640,6 +655,13 @@
 
           if (!code) {
             pendingMessages.delete(candidateKey);
+            continue;
+          }
+
+          if (!isExpectedVerificationMailDetail(config.step, detailText)) {
+            if (hasSignupVerificationMailDetail(config.step, detailText)) {
+              pendingMessages.delete(candidateKey);
+            }
             continue;
           }
 

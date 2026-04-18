@@ -6,8 +6,24 @@ if (window.__MULTIPAGE_TMAILOR_MAIL_LOADED) {
 window.__MULTIPAGE_TMAILOR_MAIL_LOADED = true;
 
 const TMAILOR_PREFIX = '[Infinitoai:tmailor-mail]';
-const { findLatestMatchingItem } = LatestMail;
-const { getStepMailMatchProfile, matchesSubjectPatterns, normalizeText } = MailMatching;
+const getStepMailMatchProfile = MailMatching?.getStepMailMatchProfile || function() {
+  return null;
+};
+const isExpectedVerificationMailDetail = MailMatching?.isExpectedVerificationMailDetail || function() {
+  return true;
+};
+const hasSignupVerificationMailDetail = MailMatching?.hasSignupVerificationMailDetail || function() {
+  return false;
+};
+const hasLoginVerificationMailDetail = MailMatching?.hasLoginVerificationMailDetail || function() {
+  return false;
+};
+const matchesSubjectPatterns = MailMatching?.matchesSubjectPatterns || function() {
+  return true;
+};
+const normalizeText = MailMatching?.normalizeText || function(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+};
 const { isMailFresh, parseMailTimestampCandidates } = MailFreshness;
 const EMAIL_REGEX = /\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/i;
 const DEFAULT_CLOUDFLARE_TIMEOUT_MS = 30000;
@@ -457,6 +473,50 @@ function checkExpectedMailboxEmail(payload = {}) {
   };
 }
 
+function getMailboxReloadRecovery(error, options = {}) {
+  const message = String(error?.message || error || '');
+  if (!message) {
+    return null;
+  }
+
+  if (/Cloudflare challenge detected on TMailor/i.test(message)) {
+    if (options.cloudflareLog) {
+      log(options.cloudflareLog, 'warn');
+    }
+    return {
+      recovery: 'reload_mailbox',
+      reason: 'cloudflare_challenge',
+      error: message,
+    };
+  }
+
+  if (/TMailor page did not finish loading mailbox controls/i.test(message)) {
+    if (options.timeoutLog) {
+      log(options.timeoutLog, 'warn');
+    }
+    return {
+      recovery: 'reload_mailbox',
+      reason: 'mailbox_controls_timeout',
+      error: message,
+    };
+  }
+
+  return null;
+}
+
+async function waitForMailboxControlsWithRecovery(timeout, options = {}) {
+  try {
+    await waitForMailboxControls(timeout);
+    return null;
+  } catch (error) {
+    const recovery = getMailboxReloadRecovery(error, options);
+    if (recovery) {
+      return recovery;
+    }
+    throw error;
+  }
+}
+
 function getPostConfirmMailboxRecoveryState() {
   const challengeTextVisible = hasCloudflareChallengeText();
   const currentEmailInput = getCurrentMailboxInput();
@@ -717,6 +777,136 @@ function findBlockingAdCloseButton() {
 function findInterstitialAdBox() {
   const adBox = document.querySelector('#ad_position_box');
   return isElementVisible(adBox) ? adBox : null;
+}
+
+function hasBlockingInterstitialOverlay() {
+  return Boolean(findInterstitialAdBox() || findBlockingAdCloseButton());
+}
+
+const REJECTED_VERIFICATION_DETAIL_STORAGE_KEY = '__MULTIPAGE_TMAILOR_REJECTED_VERIFICATION_DETAILS__';
+const REJECTED_VERIFICATION_DETAIL_MAX_AGE_MS = 15 * 60 * 1000;
+let rejectedVerificationDetailMemoryCache = {};
+
+function getRejectedVerificationDetailStorage() {
+  try {
+    if (window?.sessionStorage) {
+      return window.sessionStorage;
+    }
+  } catch {}
+  return null;
+}
+
+function normalizeRejectedVerificationDetailCache(rawValue) {
+  if (!rawValue || typeof rawValue !== 'object') {
+    return {};
+  }
+
+  const normalized = {};
+  for (const [key, entry] of Object.entries(rawValue)) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+    normalized[key] = {
+      updatedAt: Number.isFinite(entry.updatedAt) ? entry.updatedAt : Date.now(),
+      codes: Array.from(new Set((Array.isArray(entry.codes) ? entry.codes : [])
+        .map((value) => String(value || '').trim())
+        .filter((value) => /^\d{6}$/.test(value)))),
+      mailIds: Array.from(new Set((Array.isArray(entry.mailIds) ? entry.mailIds : [])
+        .map((value) => String(value || '').trim())
+        .filter(Boolean))),
+    };
+  }
+  return normalized;
+}
+
+function loadRejectedVerificationDetailCache() {
+  const storage = getRejectedVerificationDetailStorage();
+  if (storage) {
+    try {
+      return normalizeRejectedVerificationDetailCache(JSON.parse(storage.getItem(REJECTED_VERIFICATION_DETAIL_STORAGE_KEY) || '{}'));
+    } catch {}
+  }
+  return normalizeRejectedVerificationDetailCache(rejectedVerificationDetailMemoryCache);
+}
+
+function saveRejectedVerificationDetailCache(cache) {
+  const normalizedCache = normalizeRejectedVerificationDetailCache(cache);
+  rejectedVerificationDetailMemoryCache = normalizedCache;
+  const storage = getRejectedVerificationDetailStorage();
+  if (!storage) {
+    return;
+  }
+  try {
+    storage.setItem(REJECTED_VERIFICATION_DETAIL_STORAGE_KEY, JSON.stringify(normalizedCache));
+  } catch {}
+}
+
+function pruneRejectedVerificationDetailCache(cache) {
+  const now = Date.now();
+  const nextCache = {};
+  for (const [key, entry] of Object.entries(normalizeRejectedVerificationDetailCache(cache))) {
+    if (now - entry.updatedAt > REJECTED_VERIFICATION_DETAIL_MAX_AGE_MS) {
+      continue;
+    }
+    if (!entry.codes.length && !entry.mailIds.length) {
+      continue;
+    }
+    nextCache[key] = entry;
+  }
+  return nextCache;
+}
+
+function buildRejectedVerificationDetailCacheKey(step, payload = {}) {
+  const numericStep = Number.parseInt(String(step ?? 0), 10) || 0;
+  const targetEmail = String(payload?.targetEmail || '').trim().toLowerCase();
+  return `${numericStep}:${targetEmail}`;
+}
+
+function getRememberedRejectedVerificationDetails(step, payload = {}) {
+  const numericStep = Number.parseInt(String(step ?? 0), 10) || 0;
+  if (numericStep !== 7) {
+    return { codes: [], mailIds: [] };
+  }
+
+  const nextCache = pruneRejectedVerificationDetailCache(loadRejectedVerificationDetailCache());
+  saveRejectedVerificationDetailCache(nextCache);
+  const entry = nextCache[buildRejectedVerificationDetailCacheKey(step, payload)] || {};
+  return {
+    codes: Array.isArray(entry.codes) ? entry.codes.slice() : [],
+    mailIds: Array.isArray(entry.mailIds) ? entry.mailIds.slice() : [],
+  };
+}
+
+function rememberRejectedVerificationDetail(step, payload = {}, detail = {}) {
+  const numericStep = Number.parseInt(String(step ?? 0), 10) || 0;
+  if (numericStep !== 7) {
+    return;
+  }
+
+  const code = String(detail?.code || '').trim();
+  const mailId = String(detail?.mailId || '').trim();
+  if (!/^\d{6}$/.test(code) && !mailId) {
+    return;
+  }
+
+  const cache = pruneRejectedVerificationDetailCache(loadRejectedVerificationDetailCache());
+  const key = buildRejectedVerificationDetailCacheKey(step, payload);
+  const currentEntry = cache[key] || { updatedAt: Date.now(), codes: [], mailIds: [] };
+  if (/^\d{6}$/.test(code)) {
+    currentEntry.codes = Array.from(new Set([...(currentEntry.codes || []), code]));
+  }
+  if (mailId) {
+    currentEntry.mailIds = Array.from(new Set([...(currentEntry.mailIds || []), mailId]));
+  }
+  currentEntry.updatedAt = Date.now();
+  cache[key] = currentEntry;
+  saveRejectedVerificationDetailCache(cache);
+}
+
+function clearRememberedRejectedVerificationDetails(step, payload = {}) {
+  const cache = pruneRejectedVerificationDetailCache(loadRejectedVerificationDetailCache());
+  delete cache[buildRejectedVerificationDetailCacheKey(step, payload)];
+  saveRejectedVerificationDetailCache(cache);
 }
 
 function findMailDetailSkipButton() {
@@ -980,12 +1170,12 @@ function assertNoFatalMailboxError() {
 }
 
 function assertNoManualTakeoverBlockers() {
-  if (isCloudflareChallengeVisible()) {
-    throw new Error('Cloudflare challenge detected on TMailor. Temporary failure, please take over manually.');
+  if (hasBlockingInterstitialOverlay()) {
+    throw new Error('Blocking overlay detected on TMailor. Temporary failure, please take over manually.');
   }
 
-  if (findBlockingAdCloseButton()) {
-    throw new Error('Blocking overlay detected on TMailor. Temporary failure, please take over manually.');
+  if (isCloudflareChallengeVisible()) {
+    throw new Error('Cloudflare challenge detected on TMailor. Temporary failure, please take over manually.');
   }
 }
 
@@ -1034,6 +1224,9 @@ async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = DEFAULT_CLOUD
     ? 8000
     : Math.max(0, postConfirmProbeMs - 3000);
   let nextPostConfirmHeartbeatAt = CLOUDFLARE_PROGRESS_HEARTBEAT_MS;
+  if (hasBlockingInterstitialOverlay()) {
+    throw new Error('Blocking overlay detected on TMailor. Temporary failure, please take over manually.');
+  }
   if (!isCloudflareChallengeVisible()) {
     return false;
   }
@@ -1707,19 +1900,12 @@ async function fetchTmailorEmail(payload = {}) {
     domainState = {},
   } = payload || {};
 
-  try {
-    await waitForMailboxControls();
-  } catch (err) {
-    const message = String(err?.message || err);
-    if (/Cloudflare challenge detected on TMailor/i.test(message)) {
-      log('TMailor：首次处理邮箱挑战失败，准备请求后台重开邮箱页后重试。', 'warn');
-      return {
-        recovery: 'reload_mailbox',
-        error: message,
-      };
-    } else {
-      throw err;
-    }
+  const initialRecovery = await waitForMailboxControlsWithRecovery(20000, {
+    cloudflareLog: 'TMailor：首次处理邮箱挑战失败，准备请求后台重开邮箱页后重试。',
+    timeoutLog: 'TMailor：邮箱页长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
+  });
+  if (initialRecovery) {
+    return initialRecovery;
   }
 
   const tryCurrentEmail = () => {
@@ -1755,13 +1941,11 @@ async function fetchTmailorEmail(payload = {}) {
     try {
       clearedCloudflare = await ensureCloudflareChallengeClearedOrThrow(DEFAULT_CLOUDFLARE_TIMEOUT_MS);
     } catch (err) {
-      const message = String(err?.message || err);
-      if (/Cloudflare challenge detected on TMailor/i.test(message)) {
-        log('TMailor：生成邮箱时 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。', 'warn');
-        return {
-          recovery: 'reload_mailbox',
-          error: message,
-        };
+      const recovery = getMailboxReloadRecovery(err, {
+        cloudflareLog: 'TMailor：生成邮箱时 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+      });
+      if (recovery) {
+        return recovery;
       } else {
         throw err;
       }
@@ -1877,6 +2061,50 @@ function parseMailRow(element, index) {
   };
 }
 
+function findMailboxIdleEntryTarget() {
+  const currentEmailInput = getCurrentMailboxInput();
+  let current = currentEmailInput?.parentElement || null;
+  while (current) {
+    if ((current.id === 'EmailDetail' || current.id === 'homeEmail') && isElementVisible(current)) {
+      return current;
+    }
+    current = current.parentElement || null;
+  }
+
+  const detailContainer = document.querySelector('#EmailDetail');
+  if (isElementVisible(detailContainer)) {
+    return detailContainer;
+  }
+
+  const homeContainer = document.querySelector('#homeEmail');
+  if (isElementVisible(homeContainer)) {
+    return homeContainer;
+  }
+
+  return currentEmailInput && isElementVisible(currentEmailInput) ? currentEmailInput : null;
+}
+
+async function nudgeMailboxIdleEntryAfterRefresh() {
+  const pageState = detectTmailorPageState();
+  if (pageState.kind !== 'mailbox_idle') {
+    return false;
+  }
+
+  if (findMailRows().length > 0) {
+    return false;
+  }
+
+  const target = findMailboxIdleEntryTarget();
+  if (!target) {
+    return false;
+  }
+
+  log('TMailor: Refreshed into the mailbox home container without inbox rows. Clicking it once to trigger the mailbox challenge flow.', 'info');
+  simulateClick(target);
+  await sleepWithMailboxPatrol(800, { reason: 'waiting for the mailbox home container click to settle' });
+  return true;
+}
+
 async function refreshInbox(payload = {}) {
   const mismatch = checkExpectedMailboxEmail(payload);
   if (mismatch) {
@@ -1902,6 +2130,32 @@ async function refreshInbox(payload = {}) {
     await handleDismissibleInterstitialAd(5000);
     await ensureCloudflareChallengeClearedOrThrow(DEFAULT_CLOUDFLARE_TIMEOUT_MS);
     assertNoManualTakeoverBlockers();
+    const postRefreshRecovery = await waitForMailboxControlsWithRecovery(12000, {
+      cloudflareLog: 'TMailor：刷新邮箱时 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+      timeoutLog: 'TMailor：刷新后的邮箱页长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
+    });
+    if (postRefreshRecovery) {
+      return postRefreshRecovery;
+    }
+    const nudgedIdleMailbox = await nudgeMailboxIdleEntryAfterRefresh();
+    if (nudgedIdleMailbox) {
+      const postNudgeMismatch = checkExpectedMailboxEmail(payload);
+      if (postNudgeMismatch) {
+        return postNudgeMismatch;
+      }
+      assertNoFatalMailboxError();
+      await handleMonetizationVideoAd(15000);
+      await handleDismissibleInterstitialAd(5000);
+      await ensureCloudflareChallengeClearedOrThrow(DEFAULT_CLOUDFLARE_TIMEOUT_MS);
+      assertNoManualTakeoverBlockers();
+      const postNudgeRecovery = await waitForMailboxControlsWithRecovery(12000, {
+        cloudflareLog: 'TMailor：触发邮箱首页容器后的 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+        timeoutLog: 'TMailor：触发邮箱首页容器后页面长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
+      });
+      if (postNudgeRecovery) {
+        return postNudgeRecovery;
+      }
+    }
     return;
   }
 
@@ -1918,6 +2172,13 @@ async function refreshInbox(payload = {}) {
     await handleDismissibleInterstitialAd(5000);
     await ensureCloudflareChallengeClearedOrThrow(DEFAULT_CLOUDFLARE_TIMEOUT_MS);
     assertNoManualTakeoverBlockers();
+    const postInboxRecovery = await waitForMailboxControlsWithRecovery(12000, {
+      cloudflareLog: 'TMailor：返回收件箱时 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+      timeoutLog: 'TMailor：返回收件箱后页面长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
+    });
+    if (postInboxRecovery) {
+      return postInboxRecovery;
+    }
   }
 }
 
@@ -1974,13 +2235,23 @@ function findCodeInPageText() {
 }
 
 function getCurrentDetailPageText() {
-  const detailSelectors = ['h1', '#bodyCell', 'table.main', 'td#bodyCell', 'body'];
+  const detailSelectors = [
+    'h1',
+    '#bodyCell',
+    'td#bodyCell p',
+    'td#bodyCell',
+    'table.main h1',
+    'table.main p',
+    'table.main td',
+  ];
   const chunks = [];
+  const seen = new Set();
 
   for (const selector of detailSelectors) {
     const element = document.querySelector(selector);
     const text = normalizeText(element?.textContent || '');
-    if (text) {
+    if (text && !seen.has(text)) {
+      seen.add(text);
       chunks.push(text);
     }
   }
@@ -1992,8 +2263,73 @@ function shouldReturnToInboxAfterDetailRead(step) {
   return step === 4 || step === 7;
 }
 
-function readCodeFromCurrentDetailPage(step, payload = {}) {
-  if (!/emailid=/i.test(location.href)) {
+function shouldInspectDetailBeforeAcceptingCode(step) {
+  return Number.parseInt(String(step ?? 0), 10) === 7;
+}
+
+function buildStep7DetailDecisionLog(detail = {}, step = 0) {
+  const detailText = normalizeText(detail?.detailText || '');
+  const snippet = detailText.slice(0, 220);
+  const sanitizedSnippet = snippet.replace(/"/g, '\\"');
+  const signupIntent = hasSignupVerificationMailDetail(step, detailText) ? 'yes' : 'no';
+  const loginIntent = hasLoginVerificationMailDetail(step, detailText) ? 'yes' : 'no';
+  const reason = String(detail?.rejectedReason || 'accepted').trim() || 'accepted';
+  const code = String(detail?.code || '').trim() || 'none';
+  const mailId = String(detail?.mailId || '').trim() || 'none';
+  return `reason=${reason}; code=${code}; signupIntent=${signupIntent}; loginIntent=${loginIntent}; mailId=${mailId}; snippet="${sanitizedSnippet}"`;
+}
+
+async function waitForStep7DetailTextToSettle(timeoutMs = 1800, intervalMs = 250) {
+  let latestDetailText = normalizeText(getCurrentDetailPageText());
+  if (hasLoginVerificationMailDetail(7, latestDetailText)) {
+    return latestDetailText;
+  }
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    await sleepWithMailboxPatrol(intervalMs, { reason: 'waiting for the step 7 mail detail text to settle' });
+    const nextDetailText = normalizeText(getCurrentDetailPageText());
+    if (nextDetailText) {
+      latestDetailText = nextDetailText;
+    }
+    if (hasLoginVerificationMailDetail(7, nextDetailText)) {
+      return nextDetailText;
+    }
+  }
+
+  return latestDetailText;
+}
+
+async function returnToInboxFromDetailPage(payload = {}, reason = 'returning to the inbox view from a mail detail page') {
+  const startedOnDetailPage = /emailid=/i.test(location.href);
+  const refreshResult = await refreshInbox(payload);
+  if (!startedOnDetailPage || !/emailid=/i.test(location.href)) {
+    return refreshResult || null;
+  }
+
+  if (window.history && typeof window.history.back === 'function') {
+    window.history.back();
+    await sleepWithMailboxPatrol(900, { reason });
+    const mismatch = checkExpectedMailboxEmail(payload);
+    if (mismatch) {
+      return mismatch;
+    }
+    assertNoFatalMailboxError();
+    await handleMonetizationVideoAd(15000);
+    await handleDismissibleInterstitialAd(5000);
+    await ensureCloudflareChallengeClearedOrThrow(DEFAULT_CLOUDFLARE_TIMEOUT_MS);
+    assertNoManualTakeoverBlockers();
+    await waitForMailboxControlsWithRecovery(12000, {
+      cloudflareLog: 'TMailor：从详情页返回收件箱时 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+      timeoutLog: 'TMailor：从详情页返回收件箱后页面长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
+    });
+  }
+
+  return refreshResult || null;
+}
+
+async function readCodeFromVisibleDetailPage(step, payload = {}, options = {}) {
+  if (options.requireDetailUrl && !/emailid=/i.test(location.href)) {
     return null;
   }
 
@@ -2007,7 +2343,10 @@ function readCodeFromCurrentDetailPage(step, payload = {}) {
     subjectFilters = [],
     targetEmail = '',
   } = payload;
-  const detailText = getCurrentDetailPageText();
+  let detailText = getCurrentDetailPageText();
+  if (shouldInspectDetailBeforeAcceptingCode(step)) {
+    detailText = await waitForStep7DetailTextToSettle();
+  }
   const detailLower = detailText.toLowerCase();
   const subjectProfile = getStepMailMatchProfile(step);
   const targetLocal = String(targetEmail || '').split('@')[0].trim().toLowerCase();
@@ -2015,16 +2354,41 @@ function readCodeFromCurrentDetailPage(step, payload = {}) {
   const subjectMatch = subjectFilters.some((value) => detailLower.includes(String(value).toLowerCase()));
   const targetMatch = targetLocal && detailLower.includes(targetLocal);
   const stepSpecificSubjectMatch = matchesSubjectPatterns(detailText, subjectProfile);
+  const explicitLoginIntent = hasLoginVerificationMailDetail(step, detailText);
 
   if (!(stepSpecificSubjectMatch || (!subjectProfile && (senderMatch || subjectMatch || targetMatch)))) {
     return null;
   }
 
+  if (explicitLoginIntent) {
+    return {
+      code,
+      detailText,
+      emailTimestamp: 0,
+      mailId: location.href,
+    };
+  }
+
+  if (!isExpectedVerificationMailDetail(step, detailText)) {
+    return {
+      code,
+      detailText,
+      rejectedReason: hasSignupVerificationMailDetail(step, detailText) ? 'signup_intent' : 'detail_intent_mismatch',
+      emailTimestamp: 0,
+      mailId: location.href,
+    };
+  }
+
   return {
     code,
+    detailText,
     emailTimestamp: 0,
     mailId: location.href,
   };
+}
+
+async function readCodeFromCurrentDetailPage(step, payload = {}) {
+  return readCodeFromVisibleDetailPage(step, payload, { requireDetailUrl: true });
 }
 
 async function waitForCodeInPage(timeoutMs = 4000, intervalMs = 250) {
@@ -2041,9 +2405,9 @@ async function waitForCodeInPage(timeoutMs = 4000, intervalMs = 250) {
   return null;
 }
 
-async function readCodeFromMailRow(row, step = 0) {
+async function readCodeFromMailRow(row, step = 0, payload = {}) {
   let code = extractVerificationCode(row?.combinedText || '');
-  if (code) {
+  if (code && !shouldInspectDetailBeforeAcceptingCode(step)) {
     return code;
   }
 
@@ -2052,7 +2416,18 @@ async function readCodeFromMailRow(row, step = 0) {
   await settleMailDetailInterruptions();
   code = await waitForCodeInPage(8000, 250);
   if (code) {
-    return code;
+    const detailResult = await readCodeFromVisibleDetailPage(step, payload, { requireDetailUrl: false });
+    if (detailResult?.rejectedReason === 'signup_intent') {
+      rememberRejectedVerificationDetail(step, payload, detailResult);
+      log(`Step ${step}: TMailor detail mail looked like a signup verification email. Returning to inbox and fetching another mail.`, 'info');
+      log(`Step ${step}: TMailor detail rejection details: ${buildStep7DetailDecisionLog(detailResult, step)}`, 'info');
+      await returnToInboxFromDetailPage(payload, 'returning to the inbox view after rejecting a signup-style mail detail');
+      return null;
+    }
+    if (detailResult?.code) {
+      return detailResult.code;
+    }
+    return shouldInspectDetailBeforeAcceptingCode(step) ? null : code;
   }
 
   log('TMailor: Mail detail opened but the verification code did not become visible in time. Leaving the detail page untouched so the next mailbox command can recover safely.', 'info');
@@ -2071,27 +2446,73 @@ async function handlePollEmail(step, payload) {
     targetEmail = '',
   } = payload || {};
 
-  await waitForMailboxControls();
+  const initialRecovery = await waitForMailboxControlsWithRecovery(20000, {
+    cloudflareLog: 'TMailor：轮询邮件前 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+    timeoutLog: 'TMailor：邮箱页长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
+  });
+  if (initialRecovery) {
+    return initialRecovery;
+  }
 
   const subjectProfile = getStepMailMatchProfile(step);
-  const excludedCodeSet = new Set(excludeCodes);
+  const rememberedRejectedDetails = getRememberedRejectedVerificationDetails(step, payload);
+  const excludedCodeSet = new Set([...(excludeCodes || []), ...rememberedRejectedDetails.codes]);
+  const excludedMailIdSet = new Set(rememberedRejectedDetails.mailIds);
   const now = Date.now();
   const existingRowIds = new Set(findMailRows().map((element, index) => buildRowId(element, index)));
   const targetLocal = String(targetEmail || '').split('@')[0].trim().toLowerCase();
   const fallbackAfter = 4;
+  const syncRememberedRejectedDetails = () => {
+    const latestRejectedDetails = getRememberedRejectedVerificationDetails(step, payload);
+    for (const code of latestRejectedDetails.codes) {
+      excludedCodeSet.add(code);
+    }
+    for (const mailId of latestRejectedDetails.mailIds) {
+      excludedMailIdSet.add(mailId);
+    }
+  };
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     throwIfStopped();
     assertNoFatalMailboxError();
     if (attempt > 1) {
-      const refreshResult = await refreshInbox(payload);
+      let refreshResult = null;
+      try {
+        refreshResult = await refreshInbox(payload);
+      } catch (error) {
+        const recovery = getMailboxReloadRecovery(error, {
+          cloudflareLog: 'TMailor：刷新邮箱时 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+          timeoutLog: 'TMailor：刷新后的邮箱页长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
+        });
+        if (recovery) {
+          return recovery;
+        }
+        throw error;
+      }
       if (refreshResult?.recovery) {
         return refreshResult;
       }
     }
 
-    const currentDetailResult = readCodeFromCurrentDetailPage(step, payload);
-    if (currentDetailResult && !excludedCodeSet.has(currentDetailResult.code)) {
+    const currentDetailResult = await readCodeFromCurrentDetailPage(step, payload);
+    if (currentDetailResult?.rejectedReason === 'signup_intent') {
+      rememberRejectedVerificationDetail(step, payload, currentDetailResult);
+      syncRememberedRejectedDetails();
+      log(`Step ${step}: Current TMailor detail mail looked like a signup verification email. Returning to inbox and refetching.`, 'info');
+      log(`Step ${step}: Current TMailor detail rejection details: ${buildStep7DetailDecisionLog(currentDetailResult, step)}`, 'info');
+      await returnToInboxFromDetailPage(payload, 'returning to the inbox view after rejecting the current signup-style mail detail');
+    } else if (currentDetailResult?.mailId && excludedMailIdSet.has(currentDetailResult.mailId)) {
+      rememberRejectedVerificationDetail(step, payload, currentDetailResult);
+      syncRememberedRejectedDetails();
+      log(`Step ${step}: Current TMailor detail mail was already rejected earlier in this mailbox session. Returning to inbox and refetching.`, 'info');
+      await returnToInboxFromDetailPage(payload, 'returning to the inbox view after skipping a previously rejected mail detail');
+    } else if (currentDetailResult && excludedCodeSet.has(currentDetailResult.code)) {
+      rememberRejectedVerificationDetail(step, payload, currentDetailResult);
+      syncRememberedRejectedDetails();
+      log(`Step ${step}: Current TMailor detail mail uses an excluded code (${currentDetailResult.code}). Returning to inbox and waiting for a fresh mail.`, 'info');
+      await returnToInboxFromDetailPage(payload, 'returning to the inbox view after rejecting an excluded verification code');
+    } else if (currentDetailResult) {
+      clearRememberedRejectedVerificationDetails(step, payload);
       return {
         ok: true,
         ...currentDetailResult,
@@ -2100,7 +2521,15 @@ async function handlePollEmail(step, payload) {
 
     const useFallback = attempt > fallbackAfter;
     const rows = findMailRows().map(parseMailRow);
-    const latestMatch = findLatestMatchingItem(rows, (row) => {
+    const candidateMatches = rows.filter((row) => {
+      if (excludedMailIdSet.has(row.id)) {
+        return false;
+      }
+      const previewCode = extractVerificationCode(row.combinedText || '');
+      if (previewCode && excludedCodeSet.has(previewCode)) {
+        return false;
+      }
+
       const combinedLower = row.combinedText.toLowerCase();
       const senderMatch = senderFilters.some((value) => combinedLower.includes(String(value).toLowerCase()));
       const subjectMatch = subjectFilters.some((value) => combinedLower.includes(String(value).toLowerCase()));
@@ -2116,14 +2545,16 @@ async function handlePollEmail(step, payload) {
       return isMailFresh(effectiveTimestamp, { now, filterAfterTimestamp });
     });
 
-    if (latestMatch) {
-      const code = await readCodeFromMailRow(latestMatch, step);
+    for (const latestMatch of candidateMatches) {
+      const code = await readCodeFromMailRow(latestMatch, step, payload);
 
       if (!code) {
-        log(`Step ${step}: TMailor matched an email but the code is not visible yet.`, 'info');
+        syncRememberedRejectedDetails();
+        log(`Step ${step}: TMailor matched an email but the code is not visible yet or the detail intent did not match.`, 'info');
       } else if (excludedCodeSet.has(code)) {
         log(`Step ${step}: TMailor code is excluded: ${code}`, 'info');
       } else {
+        clearRememberedRejectedVerificationDetails(step, payload);
         return {
           ok: true,
           code,
@@ -2145,6 +2576,7 @@ window.__MULTIPAGE_TMAILOR_TEST_HOOKS = {
   assertNoFatalMailboxError,
   assertNoManualTakeoverBlockers,
   clickMailRow,
+  clearRememberedRejectedVerificationDetails,
   detectTmailorPageState,
   dismissBlockingOverlay,
   ensureCloudflareChallengeClearedOrThrow,
@@ -2161,8 +2593,10 @@ window.__MULTIPAGE_TMAILOR_TEST_HOOKS = {
   findCodeInPageText,
   getCloudflareCheckboxRect,
   parseMailRow,
+  rememberRejectedVerificationDetail,
   runMailboxInterruptionSweep,
   sleepWithMailboxPatrol,
+  nudgeMailboxIdleEntryAfterRefresh,
   waitForCloudflareConfirm,
   waitForMailboxControls,
 };
