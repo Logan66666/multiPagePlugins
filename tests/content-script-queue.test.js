@@ -20,7 +20,7 @@ test('content script response timeout defaults to 60s for signup-page commands',
   );
 });
 
-test('vps-panel queue timeout is longer than the default to absorb slow panel reinjection', () => {
-  assert.equal(getContentScriptQueueTimeout('signup-page', 'EXECUTE_STEP'), 15000);
+test('signup-page and vps-panel queue timeouts are longer than the default to absorb slow reinjection', () => {
+  assert.equal(getContentScriptQueueTimeout('signup-page', 'EXECUTE_STEP'), 30000);
   assert.equal(getContentScriptQueueTimeout('vps-panel', 'FETCH_OAUTH_URL'), 30000);
 });

@@ -27,6 +27,10 @@
       return 0;
     }
 
+    if (normalizedSource === 'signup-page' && normalizedType === 'EXECUTE_STEP') {
+      return 30000;
+    }
+
     if (normalizedSource === 'vps-panel') {
       return 30000;
     }

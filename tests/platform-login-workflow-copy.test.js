@@ -220,16 +220,16 @@ test('tmailor success accounting falls back to the active lease email before rea
   );
 });
 
-test('step 2 retries once by reopening the platform login page after non-navigation errors', () => {
+test('step 2 retries up to 10 times by reopening the platform login page after non-navigation errors', () => {
   const backgroundSource = readProjectFile('background.js');
 
   assert.match(
     backgroundSource,
-    /if \(step === 2 && !recoveredStep2PlatformLogin[\s\S]*await recoverStep2PlatformLogin\(err\);[\s\S]*return await executeStepAndWait\(step,\s*delayAfter,\s*\{\s*step2PlatformLogin:\s*true\s*\}\);/i
+    /const recoveredStep2PlatformLoginRetryCount = Math\.max\(0,\s*Number\.parseInt\(String\(recoveryState\?\.step2PlatformLoginRetryCount \?\? 0\),\s*10\) \|\| 0\);[\s\S]*if \(step === 2 && recoveredStep2PlatformLoginRetryCount < 10[\s\S]*await recoverStep2PlatformLogin\(err,\s*\{[\s\S]*maxAttempts:\s*10[\s\S]*\}\);[\s\S]*step2PlatformLoginRetryCount:\s*recoveredStep2PlatformLoginRetryCount \+ 1/i
   );
   assert.match(
     backgroundSource,
-    /async function recoverStep2PlatformLogin\(error\) \{[\s\S]*正在重开 Platform 登录页并重试一次[\s\S]*reuseOrCreateTab\('signup-page',\s*OFFICIAL_SIGNUP_ENTRY_URL,\s*\{[\s\S]*reloadIfSameUrl:\s*true[\s\S]*\}\);/i
+    /async function recoverStep2PlatformLogin\(error,\s*options = \{\}\) \{[\s\S]*正在重开 Platform 登录页并重试（\$\{attempt\}\/\$\{maxAttempts\}）[\s\S]*reuseOrCreateTab\('signup-page',\s*OFFICIAL_SIGNUP_ENTRY_URL,\s*\{[\s\S]*reloadIfSameUrl:\s*true[\s\S]*\}\);/i
   );
 });
 
@@ -275,7 +275,7 @@ test('step 2 navigation fallback reopens the platform login entry when recovery 
   );
   assert.match(
     backgroundSource,
-    /auth\|accounts[\s\S]*log-\?in|auth\\\|accounts[\s\S]*log-\?in|\(\?:auth\|accounts\)\\\.openai\\\.com\\\/log-\?in/i
+    /return \/\(\?:auth\|accounts\)\\\.openai\\\.com\\\/log-\?in\(\?:\[\/\?#\]\|\$\)\/i\.test\(url\)[\s\S]*&& !pageState\?\.hasVisibleVerificationInput[\s\S]*&& !pageState\?\.hasVisibleProfileFormInput/i
   );
   assert.match(
     backgroundSource,
@@ -284,6 +284,32 @@ test('step 2 navigation fallback reopens the platform login entry when recovery 
   assert.match(
     backgroundSource,
     /await executeStep2\(currentState,\s*\{\s*replayedAfterNavigationInterrupt:\s*true\s*\}\);/i
+  );
+});
+
+test('step 2 throws a recoverable error when the signup auth page never becomes ready again after navigation interruption', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /async function waitForStep2CompletionSignalOrAuthPageReady\(\) \{[\s\S]*throw new Error\('Step 2 blocked: signup auth page did not become ready again after navigation interruption\.'\);/i
+  );
+});
+
+test('mail tab readiness revives a TMailor browser error page immediately instead of waiting forever for content readiness', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /function isBrowserErrorPageTab\(tab = \{\}\) \{/i
+  );
+  assert.match(
+    backgroundSource,
+    /无法访问此网站|this site can'?t be reached|ERR_QUIC_PROTOCOL_ERROR|ERR_/i
+  );
+  assert.match(
+    backgroundSource,
+    /async function ensureMailTabReady\(mail,\s*options = \{\}\) \{[\s\S]*if \(mail\.source === 'tmailor-mail' && isBrowserErrorPageTab\(currentTab\)\) \{[\s\S]*Mailbox tab is stuck on a browser error page[\s\S]*await reviveMailTab\(mail\);/i
   );
 });
 
@@ -399,7 +425,11 @@ test('step 3 background fallback only accepts stable post-credential signup page
   );
   assert.match(
     backgroundSource,
-    /return isCanonicalEmailVerificationUrl\(pageState\?\.url\)\s*\|\|\s*isCanonicalAboutYouUrl\(pageState\?\.url\);/i
+    /if \(pageState\?\.hasVisibleVerificationInput \|\| pageState\?\.hasVisibleProfileFormInput\) \{\s*return true;\s*\}/i
+  );
+  assert.match(
+    backgroundSource,
+    /return Boolean\(\s*\(isCanonicalEmailVerificationUrl\(pageState\?\.url\)\s*&&\s*pageState\?\.hasReadyVerificationPage\)\s*\|\|\s*\(isCanonicalAboutYouUrl\(pageState\?\.url\)\s*&&\s*pageState\?\.hasReadyProfilePage\)\s*\);/i
   );
   assert.doesNotMatch(
     backgroundSource,

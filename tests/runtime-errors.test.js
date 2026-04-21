@@ -73,6 +73,10 @@ test('step 3 oauth timeout errors trigger a fresh oauth retry plan', () => {
     true
   );
   assert.equal(
+    shouldRetryStep3WithFreshOauth('Step 3 failed: Could not find email input field on signup page. URL: https://auth.openai.com/create-account/password'),
+    true
+  );
+  assert.equal(
     shouldRetryStep3WithFreshOauth('Step 3 failed: Could not find passwordless-login button or password input after submitting email. URL: https://auth.openai.com/u/login/password'),
     true
   );
@@ -90,6 +94,10 @@ test('step 3 oauth timeout errors trigger a fresh oauth retry plan', () => {
   );
   assert.equal(
     shouldRetryStep3WithFreshOauth('Step 3 failed: Auth fatal error page detected after step 3 password submit.'),
+    true
+  );
+  assert.equal(
+    shouldRetryStep3WithFreshOauth('Content script on signup-page did not respond in 15s. Try refreshing the tab and retry.'),
     true
   );
   assert.equal(
@@ -193,6 +201,10 @@ test('step 6 auth-page stalls trigger a fresh oauth retry plan', () => {
 test('step 6 refresh retry plan treats vps-panel disconnects and queue timeouts as recoverable', () => {
   assert.equal(
     shouldRetryStep6WithFreshOauth('Content script on vps-panel did not respond in 15s. Try refreshing the tab and retry.'),
+    true
+  );
+  assert.equal(
+    shouldRetryStep6WithFreshOauth('Frame with ID 0 is showing error page'),
     true
   );
   assert.equal(

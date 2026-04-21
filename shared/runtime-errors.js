@@ -43,16 +43,18 @@
 
   function shouldRetryStep3WithFreshOauth(error) {
     const message = typeof error === 'string' ? error : error?.message || '';
-    return /step 3 blocked: openai auth page timed out before credentials could be submitted/i.test(message)
-      || /step 3 blocked: auth issue page offered a "retry" recovery action\./i.test(message)
-      || /step 3 blocked: auth issue page offered a "return home" recovery link\./i.test(message)
-      || /step 3 failed: auth fatal error page detected before the password input appeared\./i.test(message)
-      || /step 3 failed: auth fatal error page detected after step 3 password submit\./i.test(message)
-      || /step 3 failed: could not find email input field on signup page\.\s*url:\s*https:\/\/auth\.openai\.com\/sign-in-with-chatgpt\/[^/\s?#]+\/consent(?:[/?#]\S*)?/i.test(message)
-      || /step 3 failed: could not find email input field on signup page\.\s*url:\s*https:\/\/platform\.openai\.com\/signup(?:[/?#]\S*)?/i.test(message)
-      || /step 3 failed: could not find passwordless-login button or password input after submitting email\.\s*url:\s*https:\/\/(?:auth|accounts)\.openai\.com\/\S+/i.test(message)
-      || /step 3 blocked: password was filled but no submit action was available on the signup form\.\s*url:\s*https:\/\/(?:auth|accounts|platform)\.openai\.com\/\S+/i.test(message)
-      || /step 3 blocked: password was filled but the signup page never advanced past the credential form/i.test(message);
+    return /(?:step 3 blocked:\s*)?openai auth page timed out before credentials could be submitted/i.test(message)
+      || /(?:step 3 blocked:\s*)?auth issue page offered a "retry" recovery action\./i.test(message)
+      || /(?:step 3 blocked:\s*)?auth issue page offered a "return home" recovery link\./i.test(message)
+      || /(?:step 3 failed:\s*)?auth fatal error page detected before the password input appeared\./i.test(message)
+      || /(?:step 3 failed:\s*)?auth fatal error page detected after step 3 password submit\./i.test(message)
+      || /(?:step 3 failed:\s*)?could not find email input field on signup page\.\s*url:\s*https:\/\/auth\.openai\.com\/sign-in-with-chatgpt\/[^/\s?#]+\/consent(?:[/?#]\S*)?/i.test(message)
+      || /(?:step 3 failed:\s*)?could not find email input field on signup page\.\s*url:\s*https:\/\/auth\.openai\.com\/create-account\/password(?:[/?#]\S*)?/i.test(message)
+      || /(?:step 3 failed:\s*)?could not find email input field on signup page\.\s*url:\s*https:\/\/platform\.openai\.com\/signup(?:[/?#]\S*)?/i.test(message)
+      || /(?:step 3 failed:\s*)?could not find passwordless-login button or password input after submitting email\.\s*url:\s*https:\/\/(?:auth|accounts)\.openai\.com\/\S+/i.test(message)
+      || /content script on signup-page did not respond in \d+s\. try refreshing the tab and retry\./i.test(message)
+      || /(?:step 3 blocked:\s*)?password was filled but no submit action was available on the signup form\.\s*url:\s*https:\/\/(?:auth|accounts|platform)\.openai\.com\/\S+/i.test(message)
+      || /(?:step 3 blocked:\s*)?password was filled but the signup page never advanced past the credential form/i.test(message);
   }
 
   function shouldRetryStep6WithFreshOauth(error) {
@@ -65,6 +67,7 @@
       || /(?:step 6 failed:\s*)?login did not advance after password submit\. still on the password page\./i.test(message)
       || /vps panel did not return a usable oauth url\./i.test(message)
       || /content script on vps-panel did not respond in \d+s\. try refreshing the tab and retry\./i.test(message)
+      || /frame with id 0 is showing error page/i.test(message)
       || isMessageChannelClosedError(message)
       || isReceivingEndMissingError(message);
   }
